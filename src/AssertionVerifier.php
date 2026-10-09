@@ -61,9 +61,9 @@ final readonly class AssertionVerifier
             throw new InvalidArgumentException('The previous counter must be between 0 and 2^32 - 1.');
         }
 
-        $document = Cbor::tryDecodeMap($assertionCbor) ?? [];
-        $signature = $document['signature'] ?? null;
-        $authenticatorData = $document['authenticatorData'] ?? null;
+        $document = Cbor::tryDecodeMap($assertionCbor);
+        $signature = $document?->get('signature');
+        $authenticatorData = $document?->get('authenticatorData');
         $authData = is_string($authenticatorData) ? AuthenticatorData::tryFromAssertion($authenticatorData) : null;
 
         if (!is_string($signature) || !is_string($authenticatorData) || $authData === null) {

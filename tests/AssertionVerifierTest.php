@@ -12,6 +12,7 @@ use CBOR\IndefiniteLengthMapObject;
 use CBOR\IndefiniteLengthTextStringObject;
 use CBOR\ListObject;
 use CBOR\MapObject;
+use CBOR\NegativeIntegerObject;
 use CBOR\Normalizable;
 use CBOR\StringStream;
 use CBOR\TextStringObject;
@@ -333,6 +334,41 @@ final class AssertionVerifierTest extends TestCase
         self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder, cbor: $document($parts)));
     }
 
+    public function testHandEncodedDocumentWithAnExtraTextKeyIsAccepted(): void
+    {
+        $builder = AssertionBuilder::create();
+        $parts = self::partsOf($builder->build(self::CLIENT_DATA));
+
+        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts)));
+        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts, TextStringObject::create('extra'), ByteStringObject::create('value'))));
+    }
+
+    /**
+     * @return iterable<string, array{list<CBORObject>}>
+     */
+    public static function provideBadKeys(): iterable
+    {
+        yield 'a byte-string key' => [[ByteStringObject::create('extra'), ByteStringObject::create('value')]];
+        yield 'a byte-string signature key besides the text one' => [[ByteStringObject::create('signature'), ByteStringObject::create('value')]];
+        yield 'an integer key' => [[UnsignedIntegerObject::create(0), ByteStringObject::create('value')]];
+        yield 'a negative integer key' => [[NegativeIntegerObject::create(-1), ByteStringObject::create('value')]];
+        yield 'a map key' => [[MapObject::create(), ByteStringObject::create('value')]];
+        yield 'signature twice' => [[TextStringObject::create('signature'), ByteStringObject::create('value')]];
+        yield 'authenticatorData twice' => [[TextStringObject::create('authenticatorData'), ByteStringObject::create('value')]];
+    }
+
+    /**
+     * @param list<CBORObject> $extra
+     */
+    #[DataProvider('provideBadKeys')]
+    public function testMapWithAKeyThatIsNotTextOrRepeatedIsMalformed(array $extra): void
+    {
+        $builder = AssertionBuilder::create();
+        $parts = self::partsOf($builder->build(self::CLIENT_DATA));
+
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts, ...$extra)));
+    }
+
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
         $vector = Fixtures::assertion(self::MUTATED_VECTOR);
@@ -510,6 +546,24 @@ final class AssertionVerifierTest extends TestCase
         }
 
         return (string) $document;
+    }
+
+    /**
+     * The assertion encoded by hand as a definite-length map, so that any key may follow its two members,
+     * one of those included.
+     */
+    private static function assertionObjectAdding(AssertionParts $parts, CBORObject ...$extraKeysAndValues): string
+    {
+        $items = [
+            TextStringObject::create('signature'),
+            ByteStringObject::create($parts->signature),
+            TextStringObject::create('authenticatorData'),
+            ByteStringObject::create($parts->authenticatorData),
+            ...$extraKeysAndValues,
+        ];
+        self::assertSame(0, count($items) % 2);
+
+        return chr(0xA0 + intdiv(count($items), 2)) . implode('', array_map(static fn(CBORObject $item): string => (string) $item, $items));
     }
 
     /**

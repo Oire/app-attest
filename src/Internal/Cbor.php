@@ -18,6 +18,7 @@ use CBOR\StringStream;
 use CBOR\TextStringObject;
 use InvalidArgumentException;
 use Throwable;
+use UnexpectedValueException;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -40,22 +41,22 @@ use Throwable;
  * Decodes untrusted CBOR without letting a decoder error or a PHP warning escape.
  *
  * Only what App Attest documents hold survives decoding: byte strings become strings, text strings become
- * CborText, lists become lists, maps become arrays keyed by their text-string keys. Any other value, such as
- * an integer, becomes null, and any other key is dropped, so neither can pass for what the document needs.
+ * CborText, lists become lists and maps become CborMap, so a map never passes for a list whatever its keys.
+ * Any other value, such as an integer, becomes null, so it cannot pass for what the document needs. A map
+ * with a key that is not a text string, or with the same key twice, makes the whole document refused.
  *
  * @internal
  */
 final class Cbor
 {
     /**
-     * The map the bytes encode, or null if they do not encode exactly one map with nothing after it.
-     *
-     * @return array<string, string|CborText|array<array-key, mixed>|null>|null
+     * The map the bytes encode, or null if they do not encode exactly one map with nothing after it, or if
+     * any map in it has a key that is not a text string or a key twice.
      */
-    public static function tryDecodeMap(string $bytes): ?array
+    public static function tryDecodeMap(string $bytes): ?CborMap
     {
         try {
-            return ErrorGuard::call(static function() use ($bytes): ?array {
+            return ErrorGuard::call(static function() use ($bytes): ?CborMap {
                 $stream = StringStream::create($bytes);
                 $object = Decoder::create()->decode($stream);
 
@@ -82,9 +83,11 @@ final class Cbor
     }
 
     /**
-     * @return string|CborText|array<array-key, mixed>|null
+     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
+     *
+     * @return string|CborText|CborMap|list<mixed>|null
      */
-    private static function convert(CBORObject $object): array|CborText|string|null
+    private static function convert(CBORObject $object): array|CborMap|CborText|string|null
     {
         return match (true) {
             $object instanceof ByteStringObject,
@@ -102,7 +105,9 @@ final class Cbor
     /**
      * @param iterable<CBORObject> $list
      *
-     * @return list<string|CborText|array<array-key, mixed>|null>
+     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
+     *
+     * @return list<string|CborText|CborMap|list<mixed>|null>
      */
     private static function convertList(iterable $list): array
     {
@@ -118,20 +123,26 @@ final class Cbor
     /**
      * @param iterable<MapItem> $map
      *
-     * @return array<string, string|CborText|array<array-key, mixed>|null>
+     * @throws UnexpectedValueException if the map has a key that is not a text string or a key twice
      */
-    private static function convertMap(iterable $map): array
+    private static function convertMap(iterable $map): CborMap
     {
-        $converted = [];
+        $entries = [];
 
         foreach ($map as $item) {
             $key = self::convert($item->getKey());
 
-            if ($key instanceof CborText) {
-                $converted[$key->value] = self::convert($item->getValue());
+            if (!$key instanceof CborText) {
+                throw new UnexpectedValueException('A map key is not a text string.');
             }
+
+            if (array_key_exists($key->value, $entries)) {
+                throw new UnexpectedValueException('A map has the same key twice.');
+            }
+
+            $entries[$key->value] = self::convert($item->getValue());
         }
 
-        return $converted;
+        return new CborMap($entries);
     }
 }

@@ -13,6 +13,7 @@ use CBOR\IndefiniteLengthMapObject;
 use CBOR\IndefiniteLengthTextStringObject;
 use CBOR\ListObject;
 use CBOR\MapObject;
+use CBOR\NegativeIntegerObject;
 use CBOR\Normalizable;
 use CBOR\StringStream;
 use CBOR\TextStringObject;
@@ -579,6 +580,93 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: self::attestationObjectRetyping($attestation, $member)));
     }
 
+    public function testHandEncodedDocumentIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: self::attestationObjectAdding($attestation))->keyId);
+    }
+
+    public function testExtraTextKeyIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $cbor = self::attestationObjectAdding(
+            $attestation,
+            document: [TextStringObject::create('extra'), ByteStringObject::create('value')],
+            attStmt: [TextStringObject::create('extra'), ByteStringObject::create('value')],
+        );
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: $cbor)->keyId);
+    }
+
+    /**
+     * @return iterable<string, array{callable(BuiltAttestation): string}>
+     */
+    public static function provideMapsInPlaceOfX5c(): iterable
+    {
+        yield 'keyed "0" and "1"' => [static fn(BuiltAttestation $a): string => self::attestationObject(
+            MapObject::create()
+                ->add(TextStringObject::create('0'), ByteStringObject::create($a->credentialDer))
+                ->add(TextStringObject::create('1'), ByteStringObject::create($a->intermediateDer)),
+            $a->authData,
+        )];
+        yield 'of indefinite length keyed "0" and "1"' => [static fn(BuiltAttestation $a): string => self::attestationObject(
+            IndefiniteLengthMapObject::create()
+                ->add(TextStringObject::create('0'), ByteStringObject::create($a->credentialDer))
+                ->add(TextStringObject::create('1'), ByteStringObject::create($a->intermediateDer)),
+            $a->authData,
+        )];
+    }
+
+    /**
+     * @param callable(BuiltAttestation): string $document
+     */
+    #[DataProvider('provideMapsInPlaceOfX5c')]
+    public function testMapInPlaceOfX5cIsMalformed(callable $document): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $document($attestation)));
+    }
+
+    /**
+     * @return iterable<string, array{list<CBORObject>, list<CBORObject>}>
+     */
+    public static function provideBadKeys(): iterable
+    {
+        yield 'a byte-string key in the document' => [[ByteStringObject::create('extra'), ByteStringObject::create('value')], []];
+        yield 'a byte-string key in attStmt' => [[], [ByteStringObject::create('extra'), ByteStringObject::create('value')]];
+        yield 'a byte-string fmt key besides the text one' => [[ByteStringObject::create('fmt'), TextStringObject::create(AttestationBuilder::FORMAT)], []];
+        yield 'a byte-string x5c key besides the text one' => [[], [ByteStringObject::create('x5c'), ListObject::create()]];
+        yield 'an integer key in the document' => [[UnsignedIntegerObject::create(0), ByteStringObject::create('value')], []];
+        yield 'a negative integer key in attStmt' => [[], [NegativeIntegerObject::create(-1), ByteStringObject::create('value')]];
+        yield 'a list key in the document' => [[ListObject::create(), ByteStringObject::create('value')], []];
+        yield 'fmt twice' => [[TextStringObject::create('fmt'), TextStringObject::create(AttestationBuilder::FORMAT)], []];
+        yield 'authData twice' => [[TextStringObject::create('authData'), ByteStringObject::create('value')], []];
+        yield 'receipt twice' => [[], [TextStringObject::create('receipt'), ByteStringObject::create('value')]];
+    }
+
+    /**
+     * @param list<CBORObject> $document
+     * @param list<CBORObject> $attStmt
+     */
+    #[DataProvider('provideBadKeys')]
+    public function testMapWithAKeyThatIsNotTextOrRepeatedIsMalformed(array $document, array $attStmt): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $cbor = self::attestationObjectAdding($attestation, $document, $attStmt);
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
+    public function testRepeatedX5cIsMalformed(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $cbor = self::attestationObjectAdding($attestation, attStmt: [TextStringObject::create('x5c'), self::x5c($attestation->credentialDer, $attestation->intermediateDer)]);
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
         $vector = Fixtures::attestation(self::MUTATED_VECTOR);
@@ -776,6 +864,44 @@ final class AttestationVerifierTest extends TestCase
             ->add($key('fmt'), $string('fmt', AttestationBuilder::FORMAT, true))
             ->add($key('attStmt'), $attStmt)
             ->add($key('authData'), $string('authData', $attestation->authData));
+    }
+
+    /**
+     * The attestation encoded by hand, so that a map may hold any key after the members Apple puts in it,
+     * one of those members included.
+     *
+     * @param list<CBORObject> $document keys and values, alternating, added to the document
+     * @param list<CBORObject> $attStmt  keys and values, alternating, added to attStmt
+     */
+    private static function attestationObjectAdding(BuiltAttestation $attestation, array $document = [], array $attStmt = []): string
+    {
+        $statement = self::handEncodedMap(
+            (string) TextStringObject::create('x5c'),
+            (string) self::x5c($attestation->credentialDer, $attestation->intermediateDer),
+            (string) TextStringObject::create('receipt'),
+            (string) ByteStringObject::create($attestation->receipt),
+            ...array_map(static fn(CBORObject $item): string => (string) $item, $attStmt),
+        );
+
+        return self::handEncodedMap(
+            (string) TextStringObject::create('fmt'),
+            (string) TextStringObject::create(AttestationBuilder::FORMAT),
+            (string) TextStringObject::create('attStmt'),
+            $statement,
+            (string) TextStringObject::create('authData'),
+            (string) ByteStringObject::create($attestation->authData),
+            ...array_map(static fn(CBORObject $item): string => (string) $item, $document),
+        );
+    }
+
+    /**
+     * A definite-length map of fewer than 24 entries from its keys and values, alternating and encoded.
+     */
+    private static function handEncodedMap(string ...$keysAndValues): string
+    {
+        self::assertSame(0, count($keysAndValues) % 2);
+
+        return chr(0xA0 + intdiv(count($keysAndValues), 2)) . implode('', $keysAndValues);
     }
 
     private static function assertChainRefusesDamage(string $der, Damaged $damaged, string $outcome): void

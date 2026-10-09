@@ -41,7 +41,7 @@ src/
   SystemClock.php           # Default PSR-20 clock
   Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey
   Exception/                # AppAttestException (abstract), Attestation/AssertionException + reason enums
-  Internal/                 # @internal: Cbor, CborText, AuthenticatorData, CertificateChain, EcPoint, NonceExtension, ErrorGuard
+  Internal/                 # @internal: Cbor, CborText, CborMap, AuthenticatorData, CertificateChain, EcPoint, NonceExtension, ErrorGuard
 resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
@@ -104,7 +104,9 @@ tests/
   its own handler still reports warnings, so such a guard would be off in the whole suite.
 - The CBOR decoder keeps only strings, lists and maps, so an integer or a tag where a byte string belongs
   is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`, so neither passes
-  for the other; only text-string keys are kept, and bytes after the top-level map make it refuse.
+  for the other; maps decode to `Internal\CborMap`, never to PHP arrays, so a map keyed `"0"`, `"1"`
+  cannot pass for a list. A key that is not a text string, a key twice, or bytes after the top-level map
+  make it refuse the whole document.
 - Only a single uncompressed P-256 `PUBLIC KEY` PEM is accepted by `AssertionVerifier`, decoded by the
   library itself, so OpenSSL never reads a file path.
 - Before a release, re-fetch Apple's root and compare its fingerprint with `TrustAnchor::APPLE_ROOT_SHA256`.

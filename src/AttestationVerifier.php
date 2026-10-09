@@ -9,6 +9,7 @@ use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
 use Oire\AppAttest\Internal\AuthenticatorData;
 use Oire\AppAttest\Internal\Cbor;
+use Oire\AppAttest\Internal\CborMap;
 use Oire\AppAttest\Internal\CborText;
 use Oire\AppAttest\Internal\CertificateChain;
 use Oire\AppAttest\Internal\EcPoint;
@@ -67,14 +68,14 @@ final readonly class AttestationVerifier
      */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed): AttestedKey
     {
-        $document = Cbor::tryDecodeMap($attestationCbor) ?? [];
-        $attStmt = $document['attStmt'] ?? null;
-        $certificates = is_array($attStmt) ? self::certificates($attStmt['x5c'] ?? null) : null;
-        $receipt = is_array($attStmt) ? $attStmt['receipt'] ?? null : null;
-        $authDataBytes = $document['authData'] ?? null;
+        $document = Cbor::tryDecodeMap($attestationCbor);
+        $attStmt = $document?->get('attStmt');
+        $certificates = $attStmt instanceof CborMap ? self::certificates($attStmt->get('x5c')) : null;
+        $receipt = $attStmt instanceof CborMap ? $attStmt->get('receipt') : null;
+        $authDataBytes = $document?->get('authData');
 
         if (
-            !self::isAppAttestFormat($document['fmt'] ?? null)
+            !self::isAppAttestFormat($document?->get('fmt'))
             || $certificates === null
             || !is_string($receipt)
             || !is_string($authDataBytes)

@@ -442,6 +442,64 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       `php-library`; confirm with `gh repo view Oire/app-attest --json description,homepageUrl,repositoryTopics`
 - [x] validation commands pass
 
+### ➕ Task 7: Launch category and bundle version (opt-in)
+
+Added during plan execution (2026-10-09) after a Codex review. Apple's "Validating apps that connect to
+your server" ends its attestation steps with "Verify the `apple_validation_category_01` value" and
+"Verify the `apple_bundle_version_01` value", both "within the `extensions` CBOR dictionary in the
+authenticator data", and its assertion steps 7 and 8 name `validationCategory` and `bundleVersion` the
+same way. Task 4 assumed these were certificate extensions to ignore; they are entries in the authData
+`extensions` map, after the COSE key. Only Apple's guide sample (`takimoto3-apple-guide`) carries them:
+`apple_validation_category_01` as a 4-byte little-endian byte string (`01 00 00 00`) and
+`apple_bundle_version_01` as the text string `"1"`, with the ED flag clear. No iOS 14 vector has them, and
+Apple publishes no assertion sample with them. The maintainer chose to report them and enforce them only on
+request, so every existing call keeps its behavior.
+
+#### Files
+- Create: `src/Value/ValidationCategory.php`, `src/Value/LaunchPolicy.php`
+- Modify: `src/Value/AttestedKey.php`, `src/AttestationVerifier.php`, `src/AssertionVerifier.php`,
+  `src/Internal/AuthenticatorData.php` (and `Cbor` if needed), both reason enums
+- Modify: `tests/Support/AttestationBuilder.php`, `tests/Support/AssertionBuilder.php`, the verifier tests
+- Modify: `README.md`, `CHANGELOG.md`, `CLAUDE.md`
+
+#### Steps
+- [ ] `authData` parsing goes past the COSE key: decode the credential public key as one CBOR item, then
+      at most one CBOR map of extensions, whatever the ED flag says (Apple's sample has it clear). Bytes
+      that are neither stay ignored as before; an extensions area that is not one well-formed map yields
+      no values rather than a failure, unless a policy needs them. The assertion `authenticatorData` is
+      read the same way after its 37 bytes, accepting the keys `validationCategory` and `bundleVersion`
+      as well as the `apple_…_01` spellings
+- [ ] values: the category is a `UInt32` given either as a 4-byte little-endian byte string (Apple's
+      sample) or as a CBOR unsigned integer; the bundle version is a text string. Anything else counts as
+      absent
+- [ ] `ValidationCategory`, an int-backed enum with Apple's launch-constraint numbering (confirm it from
+      Apple's "Defining launch environment and library constraints": 1 platform, 2 TestFlight,
+      3 development, 4 App Store, 5 enterprise or ad hoc, 6 Developer ID, 7 to 9 restricted, 10 none;
+      name the restricted ones as Apple does)
+- [ ] `AttestedKey` gains trailing, defaulted `?int $validationCategory` (raw value, so an unknown number
+      is still reported) and `?string $bundleVersion`, plus a `validationCategory(): ?ValidationCategory`
+      helper or equivalent; existing constructor calls keep working
+- [ ] `LaunchPolicy` (final readonly, `@psalm-api`): a list of allowed `ValidationCategory` cases (empty
+      means "do not check the category") and an optional `Closure(string): bool` for the bundle version
+      (null means "do not check it"); named constructors or a fluent builder for the common cases
+- [ ] both `verify()` methods take a trailing `?LaunchPolicy $launchPolicy = null`. With null, nothing
+      changes. With a policy, a category that is absent, unknown or not allowed is the new reason
+      `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
+      `BundleVersion`; both run after every existing check. Add both cases to `AttestationFailureReason`
+      and `AssertionFailureReason`
+- [ ] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
+      into `authData` and `authenticatorData`
+- [ ] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
+      allowing `1`, refused with `ValidationCategory` by an App Store-only policy and with `BundleVersion`
+      by a closure wanting `"2.0"`; an iOS 14 vector reports nulls, verifies without a policy and fails with
+      a policy; builder attestations and assertions cover both encodings, an unknown category, a malformed
+      map and a missing value; every existing test still passes unchanged
+- [ ] README: what the two values are, Apple's wording, that only newer OS versions send them, the
+      opt-in policy with an example, and that no genuine assertion sample with them exists. CHANGELOG
+      1.0.0 and CLAUDE.md updated. Task 4's sentence about "newer extensions on the credential certificate"
+      gets a ⚠️ note pointing here
+- [ ] validation commands pass
+
 ## Technical details
 
 ### Public API

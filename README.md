@@ -212,8 +212,8 @@ log. Do not send them to the client: refuse with a generic answer.
 
 * `Format` — the document is not a well-formed `apple-appattest` object, `authData` is too short, or the
   credential certificate does not hold an uncompressed P-256 key. The document must be one CBOR map with
-  nothing after it, its keys and `fmt` text strings, and `x5c`'s entries, `receipt` and `authData` byte
-  strings.
+  nothing after it, the keys of every map in it distinct text strings, `x5c` an array, `fmt` a text
+  string, and `x5c`'s entries, `receipt` and `authData` byte strings.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
   an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is not exactly
   one DER `SEQUENCE` with nothing after it, or is longer than 4096 bytes (Apple's are about 1 KiB).
@@ -230,7 +230,8 @@ log. Do not send them to the client: refuse with a generic answer.
 `Oire\AppAttest\Exception\AssertionFailureReason`:
 
 * `Format` — the document is not an object with a `signature` and 37 bytes of `authenticatorData`. It
-  must be one CBOR map with nothing after it, its keys text strings and both members byte strings.
+  must be one CBOR map with nothing after it, the keys of every map in it distinct text strings and both
+  members byte strings.
 * `Signature` — the signature does not verify with the public key over this client data.
 * `RpIdHash` — the assertion was made for another team or bundle.
 * `Counter` — the counter did not grow: a replayed or reordered assertion.
