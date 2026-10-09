@@ -11,6 +11,7 @@ use CBOR\NegativeIntegerObject;
 use CBOR\TextStringObject;
 use CBOR\UnsignedIntegerObject;
 use DateTimeImmutable;
+use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
@@ -18,7 +19,6 @@ use Oire\AppAttest\Value\TeamId;
 use phpseclib3\Crypt\Common\PrivateKey;
 use phpseclib3\Crypt\Common\PublicKey;
 use phpseclib3\Crypt\PublicKeyLoader;
-use phpseclib3\File\ASN1;
 use phpseclib3\File\ASN1\Element;
 use phpseclib3\File\X509;
 use RuntimeException;
@@ -46,21 +46,6 @@ use RuntimeException;
  */
 final class AttestationBuilder
 {
-    public const string NONCE_EXTENSION_OID = '1.2.840.113635.100.8.2';
-
-    /**
-     * The nonce extension's value: SEQUENCE { [1] EXPLICIT OCTET STRING }.
-     */
-    public const array NONCE_EXTENSION_MAP = [
-        'type' => ASN1::TYPE_SEQUENCE,
-        'children' => [
-            'nonce' => [
-                'constant' => 1,
-                'explicit' => true,
-                'type' => ASN1::TYPE_OCTET_STRING,
-            ],
-        ],
-    ];
     public const string DEFAULT_TIME = '2026-01-15T12:00:00Z';
     public const string RECEIPT = 'oire-test-receipt';
     private const string FORMAT = 'apple-appattest';
@@ -225,7 +210,7 @@ final class AttestationBuilder
 
     public function build(): BuiltAttestation
     {
-        X509::registerExtension(self::NONCE_EXTENSION_OID, self::NONCE_EXTENSION_MAP);
+        NonceExtension::register();
 
         $rootKey = EcKey::generate();
         $intermediateKey = EcKey::generate();
@@ -350,7 +335,7 @@ final class AttestationBuilder
         }
 
         if ($nonceExtensionDer !== null) {
-            $certificate->setExtensionValue(self::NONCE_EXTENSION_OID, new Element($nonceExtensionDer));
+            $certificate->setExtensionValue(NonceExtension::OID, new Element($nonceExtensionDer));
         }
 
         return self::der($certificate, $certificate->sign($issuer, $subject));

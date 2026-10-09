@@ -18,7 +18,7 @@ to the caller, who passes the stored public key and counter in and stores the ne
 
 ## Done when
 
-- [ ] `AttestationVerifier::verify` accepts every genuine attestation in the golden vectors and rejects
+- [x] `AttestationVerifier::verify` accepts every genuine attestation in the golden vectors and rejects
       each documented failure with its own `$reason`: `CertificateChain`, `Nonce`, `KeyId`, `RpIdHash`,
       `Counter`, `Environment`, `Format` — each failure reached through the verifier's inputs or through
       the test-only `AttestationBuilder` (Task 3), never by editing a signed vector
@@ -27,7 +27,7 @@ to the caller, who passes the stored public key and counter in and stores the ne
       each with its own `$reason`
 - [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
-- [ ] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
+- [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
       time
 - [ ] all binary handling is 8-bit-safe under Oire's code style (Development approach)
 - [ ] Psalm level 1, PHP CS Fixer with Oire's rules and PHPUnit pass in CI on PHP 8.3, 8.4 and 8.5
@@ -317,16 +317,24 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 - Create: `src/AttestationVerifier.php`, `src/Internal/Cbor.php`, `src/Internal/AuthenticatorData.php`,
   `src/Internal/CertificateChain.php`, `src/Internal/EcPoint.php`
 - Create: `tests/AttestationVerifierTest.php`
+- ➕ Create: `src/Internal/NonceExtension.php` (the nonce extension's OID and ASN.1 map, shared with
+  `AttestationBuilder`), `src/Internal/ErrorGuard.php` (turns PHP warnings from parsing untrusted bytes
+  into exceptions); Modify: `tests/Support/AttestationBuilder.php`, `phpunit.xml.dist` (`failOnWarning`,
+  `failOnNotice`) (plan execution, 2026-10-09)
 
 #### Steps
-- [ ] `verify(attestationCbor, clientDataHash, keyId, app, allowed)` in Apple's order, each failure an
+- [x] `verify(attestationCbor, clientDataHash, keyId, app, allowed)` in Apple's order, each failure an
       `AttestationException` with the reason named:
       1. decode CBOR `{fmt: "apple-appattest", attStmt: {x5c, receipt}, authData}` — any decoder
          exception, a wrong `fmt`, a missing member or a short `authData` is `Format`;
       2. `x5c` holds **exactly two** certificates (credential, intermediate); build the chain to the
          trust anchor with phpseclib, each certificate valid at the clock's time, the intermediate a CA
-         (phpseclib's `validateSignature()` checks CA status by default — never turn it off) — else
-         `CertificateChain`;
+         (its `basicConstraints` `cA` flag, checked by the library itself) — else `CertificateChain`;
+         ⚠️ phpseclib's `validateSignature()` does **not** check CA status (the `basicConstraints` check in
+         `loadCA()` is commented out), so `CertificateChain` reads the intermediate's `cA` flag itself; it
+         also calls `X509::disableURLFetch()`, since phpseclib would otherwise fetch `caIssuers` URLs.
+         phpseclib warns on malformed DER, so all its parsing runs under `ErrorGuard` (plan execution,
+         2026-10-09)
       3. nonce = SHA-256(`authData` ‖ `clientDataHash`) must equal (`hash_equals`) the 32-byte octet
          string inside the credential certificate's extension `1.2.840.113635.100.8.2`, read through
          its ASN.1 layout (Context); an absent or malformed extension is `Nonce`;
@@ -339,14 +347,21 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       6. counter = 0 — else `Counter`;
       7. `aaguid` names an environment in `allowed` — else `Environment`;
       8. `credentialId` = key id — else `KeyId`
-- [ ] newer extensions on the credential certificate (`apple_validation_category_01`,
+
+      ⚠️ `clientDataHash` may be any length (Apple's guide vector uses the raw 24-byte challenge), and
+      `authData` may carry bytes after the credential public key (that vector's extensions map, with ED
+      clear): the parser requires the layout up to the credentialId and at least one byte of key, and
+      interprets nothing after it. The nonce extension map lives in `Internal\NonceExtension`, registered
+      by both the verifier and the builder. The CBOR decoder keeps only strings, lists and maps, so an
+      integer or a tag where a byte string belongs is `Format` (plan execution, 2026-10-09)
+- [x] newer extensions on the credential certificate (`apple_validation_category_01`,
       `apple_bundle_version_01` and any unknown one) are ignored, never required
-- [ ] returns `AttestedKey` with the public key as PEM, the environment, the receipt bytes and counter 0
-- [ ] tests: every genuine vector accepted with the expected key; each input-triggered failure (Task 3's
+- [x] returns `AttestedKey` with the public key as PEM, the environment, the receipt bytes and counter 0
+- [x] tests: every genuine vector accepted with the expected key; each input-triggered failure (Task 3's
       list) and each builder-made failure raises its own reason; production accepted and refused through
       the builder; a garbage document is `Format`, never a PHP warning; a key whose `x` coordinate starts
       with a zero byte (the builder generates keys until one does) gets the right id
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ### Task 5: `AssertionVerifier`
 
