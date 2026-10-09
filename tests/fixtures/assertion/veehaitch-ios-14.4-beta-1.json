@@ -1,0 +1,27 @@
+{
+    "vector": "veehaitch-ios-14.4-beta-1.cbor",
+    "origin": {
+        "repository": "https://github.com/veehaitch/devicecheck-appattest",
+        "commit": "cb26211f63c1e2e7949deafe2efdf352daca27fa",
+        "path": "src/test/resources/ios-14.4-beta-1.yaml",
+        "copy": "source/veehaitch/ios-14.4-beta-1.yaml",
+        "license": "LICENSE-veehaitch",
+        "documentId": "5a00b67f-c1a4-2304-0f88-f5fd3abd47eb",
+        "field": "assertionBase64"
+    },
+    "attestation": "veehaitch-ios-14.4-beta-1",
+    "teamId": "6MURL8TA57",
+    "bundleId": "de.vincent-haupert.apple-appattest-poc",
+    "keyId": "1IjO25E9ogRMsx-fmYwp8o7Nq3gTCeyj3ZQCqj0MGt8",
+    "clientData": "d3VyemVscGZyb3Bm",
+    "challenge": "d3VyemVs",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpCYHC9SCwK/jMtzjrCtrSgbL3IHv\nH4LAc7ar6garYFh+EYm9FCDz0auagvEzElrIE2II6D9pLLTr0q0Wv6CZkQ==\n-----END PUBLIC KEY-----\n",
+    "previousCounter": 0,
+    "environment": "development",
+    "verifyAt": "2021-01-09T23:22:55.514Z",
+    "verifyAtSource": "the timestamp field of the reference document",
+    "expected": {
+        "result": "accepted",
+        "counter": 1
+    }
+}

@@ -1,0 +1,91 @@
+{
+    "name": "oire/app-attest",
+    "description": "Verify Apple App Attest attestations and assertions in PHP: certificate chain, nonce, key id, counter. Stateless, no I/O.",
+    "type": "library",
+    "keywords": [
+        "app-attest",
+        "apple",
+        "ios",
+        "devicecheck",
+        "attestation",
+        "assertion",
+        "security"
+    ],
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/Oire/php-code-style"
+        }
+    ],
+    "require": {
+        "php": ">=8.3",
+        "ext-gmp": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-sodium": "*",
+        "phpseclib/phpseclib": "^3.0.57",
+        "psr/clock": "^1.0",
+        "spomky-labs/cbor-php": "^3.4"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "*",
+        "oire/php-code-style": "dev-master",
+        "phpunit/phpunit": "*",
+        "psalm/plugin-phpunit": "*",
+        "symfony/clock": "^7.4 || ^8.0",
+        "vimeo/psalm": "dev-master"
+    },
+    "license": "Apache-2.0",
+    "authors": [
+        {
+            "name": "André Polykanine",
+            "email": "ap@oire.me",
+            "homepage": "https://oire.org/",
+            "role": "developer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/Oire/app-attest/issues",
+        "source": "https://github.com/Oire/app-attest"
+    },
+    "autoload": {
+        "psr-4": {
+            "Oire\\AppAttest\\": "src"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Oire\\AppAttest\\Tests\\": "tests"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "lint": [
+            "php-cs-fixer fix --dry-run --diff",
+            "psalm --no-cache"
+        ]
+    },
+    "config": {
+        "platform": {
+            "php": "8.3.16"
+        },
+        "sort-packages": true,
+        "preferred-install": {
+            "*": "dist"
+        }
+    },
+    "funding": [
+        {
+            "type": "github",
+            "url": "https://github.com/sponsors/Oire"
+        },
+        {
+            "type": "Ko-fi",
+            "url": "https://ko-fi.com/oire"
+        },
+        {
+            "type": "paypal",
+            "url": "https://www.paypal.com/donate/?hosted_button_id=D9GB6MGF8BHH8"
+        }
+    ]
+}

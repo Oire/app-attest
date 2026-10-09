@@ -1,0 +1,718 @@
+# App Attest verification library for PHP
+
+## Overview
+
+Apple's App Attest lets a server confirm that a request comes from a genuine copy of its iOS app on a
+genuine Apple device: the app attests a key once (an **attestation**, a CBOR document with a certificate
+chain to Apple's App Attest root) and later signs requests with it (an **assertion**). Verifying both
+takes a dozen precise checks, and there is **no maintained PHP library** for it — only references in
+other languages: `veehaitch/devicecheck-appattest` (Kotlin) and `takimoto3/app-attest` (Go).
+
+This plan builds one: **`oire/app-attest`**, namespace `Oire\AppAttest`, Apache-2.0, published on Packagist,
+following Oire's PHP conventions (`oire/iridium` is the model, with the deviations Task 1 states). Its
+first client is AccessMind, which needs the first stable release.
+
+The library **verifies and nothing else**: it keeps no state, stores no keys, issues no challenges and
+makes no network call. Storage, challenge issuance, the `clientData` check and the counter race belong
+to the caller, who passes the stored public key and counter in and stores the new counter.
+
+## Done when
+
+- [x] `AttestationVerifier::verify` accepts every genuine attestation in the golden vectors and rejects
+      each documented failure with its own `$reason`: `CertificateChain`, `Nonce`, `KeyId`, `RpIdHash`,
+      `Counter`, `Environment`, `Format` — each failure reached through the verifier's inputs or through
+      the test-only `AttestationBuilder` (Task 3), never by editing a signed vector
+- [x] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
+      a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
+      each with its own `$reason`
+      ⚠️ The counter is returned as `VerifiedAssertion::$counter` since the return type changed at the
+      maintainer's request on 2026-10-09 (Task 5)
+- [x] ➕ both verifiers report the launch validation category and bundle version from the authenticator
+      data extensions, `AttestationVerifier` on `AttestedKey` and `AssertionVerifier` on
+      `VerifiedAssertion`; both, only with a `LaunchPolicy`, refuse them with `ValidationCategory` and
+      `BundleVersion`; without a policy they are only reported and every earlier failure is unchanged
+      (Task 7)
+      ⚠️ At first `AssertionVerifier` enforced the values without reporting them (review, 2026-10-09);
+      the maintainer then chose, before `v1.0.0`, that it returns `VerifiedAssertion` (2026-10-09)
+- [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
+      asserted by a test, so a swapped file fails loudly
+- [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
+      time
+- [x] all binary handling is 8-bit-safe under Oire's code style (Development approach)
+- [ ] Psalm level 1, PHP CS Fixer with Oire's rules and PHPUnit pass in CI on PHP 8.3, 8.4 and 8.5
+- [x] Dependabot watches Composer and GitHub Actions; `release.yml` is set up to create the GitHub Release
+      on a `v*` tag (confirmed at the v1.0.0 tag, Post-completion)
+- [x] README documents installation, both verifiers, the reasons, and what the caller must do itself
+- [ ] `v1.0.0` is tagged, the package is on Packagist, and the repository's description and topics are
+      set
+      ⚠️ The description, homepage and topics were set in Task 6; the tag and Packagist are left to
+      Post-completion (plan execution, 2026-10-09)
+- [ ] all validation commands pass
+
+## Validation commands
+
+- install: `composer install`
+- test: `composer test` (`phpunit`)
+- lint and static analysis: `composer lint` (`php-cs-fixer fix --dry-run --diff`, then `psalm --no-cache`)
+- CI: `.github/workflows/ci.yml`, green on PHP 8.3, 8.4 and 8.5
+
+The repository's `compose.yaml` gives a PHP 8.5 CLI container for machines without a local PHP:
+`docker compose run --rm php composer test`.
+
+## Context
+
+- **Model repository:** `C:/repos/Oire/iridium-php` — `composer.json` (`"php": ">=8.3"`, `ext-mbstring`,
+  the `oire/php-code-style` VCS repository, `authors`, `support` and `funding`; it has **no** `scripts`
+  section, so this plan writes its own), `psalm.xml.dist` (`errorLevel="1"`, unused-code checks, the
+  PHPUnit plugin), `phpunit.xml.dist`, `CHANGELOG.md`, `CLAUDE.md`, the Apache-2.0 `LICENSE`, the
+  `export-ignore` rules in `.gitattributes`, `.github/dependabot.yml` and `.github/release.yml`, and the
+  layout of `src/` into `Exception/`, `Key/` and `Storage/` with an `IridiumException` base. Its CI is
+  three workflows running through `docker compose` with a `PHP_VERSION` build argument, and its
+  Dockerfile is FrankenPHP with MariaDB; this library needs neither a server nor a database, so it
+  deliberately uses **one** `ci.yml` with `shivammathur/setup-php` and a matrix, and a plain
+  `php:8.5-cli` Dockerfile (plan review, 2026-10-08). One iridium lesson is kept: Psalm is pinned to
+  `dev-master`, so CI runs `composer install` from the lock, never `composer update`.
+- **Supported PHP versions** (php.net/supported-versions, checked 2026-10-09): 8.3 is security-only
+  until 2027-12-31, 8.4 until 2028-12-31, 8.5 is active. None is past end of life, so all three stay;
+  8.2 (end of life 2026-12-31) is not supported.
+- **Code style:** `oire/php-code-style` (not on Packagist, pulled as a VCS repository). The repository's
+  `.php-cs-fixer.dist.php` only builds the finder and returns `Oire\Helpers\CsFixerRules::style($finder)`;
+  every rule lives in the package. It enables `setRiskyAllowed(true)` and the risky **`mb_str_functions`**
+  rule, which rewrites `substr`/`strlen` into `mb_substr`/`mb_strlen` with no encoding argument — under
+  the default UTF-8 that corrupts byte offsets in `authenticatorData`. Iridium copes by requiring
+  `ext-mbstring` and always passing `'8bit'` (`Crypt::STRING_ENCODING_8BIT`); so does this library. It
+  also enables `global_namespace_import` and `fully_qualified_strict_types`, which back the import rule
+  in Development approach.
+- **References to port from**, with their test data as golden vectors:
+  `veehaitch/devicecheck-appattest` (Kotlin, Apache-2.0) and `takimoto3/app-attest` (Go, MIT). Port the
+  checks, not the code structure. Record each vector's origin (repository, commit, path) in
+  `tests/fixtures/README.md`, and copy the Apache-2.0 license text and any `NOTICE` file beside the
+  vectors taken from veehaitch, and the MIT license beside takimoto3's.
+- **Apple's documentation:** "Validating apps that connect to your server" (the attestation steps
+  1-9 and the assertion steps 1-6) is the specification; the references are how to read it.
+- **Apple App Attest root:** `Apple_App_Attestation_Root_CA.pem` from
+  `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`.
+- **`authenticatorData` layout** (big-endian): `rpIdHash` 32 bytes | flags 1 | signCount 4 | then, in an
+  attestation only, `aaguid` 16 | credentialId length 2 | credentialId | the COSE public key. An
+  assertion's is exactly 37 bytes. Anything shorter than its layout requires is `Format`.
+  ⚠️ So is an attestation whose credential public key, after the credentialId, is not one CBOR map
+  (Codex review C3-1, Task 7, 2026-10-09)
+  ⚠️ An assertion's `authenticatorData` is at least 37 bytes: newer OS versions append an `extensions`
+  CBOR map after them, and after the COSE key in an attestation; Apple's attestation list continues past
+  step 9 with the launch category and bundle version checks, and its assertion steps 7 and 8 do the same
+  (➕ Task 7, plan execution, 2026-10-09)
+- **The nonce extension** (OID `1.2.840.113635.100.8.2`) holds DER `SEQUENCE { [1] EXPLICIT OCTET STRING
+  (32 bytes) }`, not a bare octet string, and phpseclib does not know the OID.
+- **Apple identifiers:** a team id is 10 uppercase letters and digits; a bundle id is non-empty and
+  holds only `A-Z`, `a-z`, `0-9`, `-` and `.`.
+- The repository is new: it holds nothing yet but this plan. Its GitHub description is a placeholder
+  ("PHP library for managing Apple App Attest.") and it has no topics.
+
+Dependencies (Composer; versions pinned to majors):
+
+- `spomky-labs/cbor-php` `^3.4` — CBOR decoding and, in tests, encoding. It requires `ext-mbstring` and
+  `brick/math` and only *suggests* `ext-gmp`; this library **requires** `ext-gmp` anyway, because
+  cbor-php's own suggestion says decoding untrusted input without it is quadratic in a big number's
+  length, and every attestation is untrusted input.
+- `phpseclib/phpseclib` `^3.0` — X.509 parsing, chain validation against an in-memory CA with an
+  injected validation date, the nonce extension (registered with `X509::registerExtension` and an ASN.1
+  map, or decoded with `ASN1::decodeBER`), and, in tests, certificate signing. Considered and rejected:
+  `openssl_x509_verify` + `openssl_x509_parse` + a hand-written DER reader, which drops a dependency but
+  cannot validate at a past date (the golden vectors' certificates have expired) and puts DER parsing in
+  this library.
+- `psr/clock` `^1.0` — the clock interface; the library ships a small `SystemClock` used when none is
+  passed. `symfony/clock` is **not** a runtime dependency, so consumers outside Symfony do not pull it
+  in; any PSR-20 clock, Symfony's included, can be passed.
+- `ext-openssl` — ECDSA P-256 verification and key export. `ext-mbstring`, `ext-gmp`. `ext-sodium` —
+  base64url (`sodium_bin2base64` / `sodium_base642bin` with `SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING`);
+  `oire/iridium`'s `Base64` was considered and rejected, because it would bring `ext-pdo` and a token
+  storage layer this library never uses.
+- Dev: `phpunit/phpunit`, `vimeo/psalm` with `psalm/plugin-phpunit`, `friendsofphp/php-cs-fixer`,
+  `oire/php-code-style`, `symfony/clock` `^7.4 || ^8.0` (its `MockClock` pins the vectors' times; the
+  8.3 platform resolves 7.4).
+
+## Development approach
+
+- One task at a time; the validation commands pass before the next task starts.
+- Every check comes with a test for its success and failure path. Failures are reached through the
+  verifier's **inputs** (a different `clientDataHash`, key id, `AppIdentity`, environment list, clock or
+  trust anchor) or through attestations the test-only `AttestationBuilder` signs itself (Task 3) —
+  **never by editing a genuine vector**: every field of `authenticatorData` is bound into the signed
+  nonce, and the nonce sits inside a signed certificate, so an edited vector fails at the nonce or the
+  chain, not at the check under test (plan review, 2026-10-08).
+- Failures are exceptions carrying a typed `$reason`, never `false` and never a bare message, so a
+  caller maps them without parsing text. Messages name the check, never echo key material. A caller
+  error — an unparsable `$publicKeyPem`, a `$previousCounter` outside 0..2^32−1, an invalid team or
+  bundle id — is an `InvalidArgumentException`, never a verification failure.
+  ⚠️ So is an `$allowed` that is empty or holds anything but `Environment` cases, a `LaunchPolicy`
+  category that is not a `ValidationCategory`, `LaunchPolicy::allowing()` with no category, and a
+  `TrustAnchor::fromPem()` argument that is not exactly one certificate (review, 2026-10-09)
+- **Binary safety:** bytes are sliced with `mb_substr(…, '8bit')`, measured with `mb_strlen(…, '8bit')`,
+  or read with `unpack()` (`'N'` and `'n'` for the big-endian counter and length); hashes and ids are
+  compared with `hash_equals`. A plain `substr` would be rewritten by the code style.
+- **Base64url wherever the library or its documentation encodes bytes as text** — fixture sidecars,
+  `AttestedKey::keyIdBase64Url()`, README examples of what a client sends — always without padding,
+  through `ext-sodium`. The verifiers themselves take raw bytes (Public API).
+- `openssl_verify` counts as success **only when it returns `=== 1`**: it returns `1`, `0`, `-1` or
+  `false`, and `-1` is truthy.
+- **Imports:** every class, global ones included, is imported with `use` and written unqualified
+  (`use DateTimeImmutable;`, `use InvalidArgumentException;`), never as `\DateTimeImmutable`. Native
+  functions are called unqualified: never `use function`, never a leading backslash.
+- No I/O: no network, no filesystem except reading the bundled root certificate, no logging.
+- `declare(strict_types=1)` everywhere; final classes (the abstract exception base excepted); readonly
+  value objects.
+- LF everywhere, American English.
+- When scope changes, update this plan: new tasks get a "➕" prefix, blockers a "⚠️" prefix.
+
+## Implementation steps
+
+### Task 1: Repository scaffold and CI
+
+#### Files
+- Create: `composer.json`, `composer.lock`, `CHANGELOG.md`, `CLAUDE.md` (stub)
+- Modify: `README.md` (GitHub's stub). `LICENSE` already exists: the repository was created on
+  2026-10-08 as public with **Apache-2.0** (maintainer's choice, as in `oire/iridium`), which also
+  matches the Apache-2.0 `veehaitch/devicecheck-appattest` whose vectors the tests copy; keep it as is
+- Create: `phpunit.xml.dist`, `psalm.xml.dist`, `.php-cs-fixer.dist.php`
+- Create: `Dockerfile` (`php:8.5-cli` plus `install-php-extensions gmp`; no database), `compose.yaml`
+- Create: `.gitignore`, `.gitattributes`, `.editorconfig`
+- Create: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/dependabot.yml`,
+  `.github/release.yml`
+- Create: `src/SystemClock.php` (so `src/` is not empty for Psalm and the autoloader),
+  `tests/SmokeTest.php`
+
+#### Steps
+- [x] `composer.json`: name `oire/app-attest`, description, `"license": "Apache-2.0"`, `"php": ">=8.3"`,
+      `ext-gmp`, `ext-mbstring`, `ext-openssl`, `ext-sodium`, the dependencies from Context, `authors`,
+      `support` (pointing at `Oire/app-attest`) and `funding` as in iridium, PSR-4 `Oire\AppAttest\` →
+      `src/` and `Oire\AppAttest\Tests\` → `tests/`, the `oire/php-code-style` VCS repository, scripts
+      written out: `"test": "phpunit"` and `"lint": ["php-cs-fixer fix --dry-run --diff", "psalm
+      --no-cache"]`, and `"config": {"platform": {"php": "8.3.16"}, "sort-packages": true}` so the
+      committed lock resolves for the oldest supported PHP and the 8.3 job can install it (a lock made on
+      8.5 with open dev constraints would pull packages that need 8.4); commit `composer.lock`.
+      ⚠️ The platform is 8.3.16, not 8.3.0: `vimeo/psalm` `dev-master` requires `~8.3.16` on 8.3,
+      so 8.3.0 cannot resolve; CI's 8.3 job gets the latest 8.3 patch release (plan execution, 2026-10-09)
+- [x] `.gitattributes`: `* text=auto eol=lf`; `tests/fixtures/** binary`; iridium-style `export-ignore`
+      for `tests/`, `docs/`, `.github/`, the Docker and tool config files — and **not** for
+      `resources/`, which holds the Apple root `TrustAnchor::apple()` reads at run time
+- [x] Psalm, PHPUnit and CS Fixer configured as in `oire/iridium`; the finder covers `src` and `tests`
+- [x] `SystemClock` implements `Psr\Clock\ClockInterface` and returns `new DateTimeImmutable()`, with
+      `use DateTimeImmutable;` (Development approach, imports)
+- [x] CI on `ubuntu-latest`, `permissions: contents: read`, a matrix over PHP 8.3, 8.4 and 8.5
+      (`shivammathur/setup-php` with `gmp`, `mbstring` and `sodium`), running `composer install` (never
+      `update`), lint and test
+- [x] `.github/dependabot.yml` copied from iridium: `composer` and `github-actions`, daily at 04:00
+      Europe/Berlin, assigned to `Menelion`. Because CI never runs `composer update`, Dependabot's lock
+      updates are what keep the dependencies current
+- [x] `.github/release.yml` copied from iridium (release-note categories, Dependabot excluded);
+      `.github/workflows/release.yml` runs on `push` of tags `v*` with `permissions: contents: write` and
+      creates the release with `gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes`.
+      Packagist is updated by its webhook, not by this workflow (Post-completion)
+- [x] a smoke test that autoloads the namespace and reads the time from `SystemClock`
+- [x] validation commands pass locally; CI is checked on the pull request (see Done when)
+
+### Task 2: Value types, exceptions and the trust anchor
+
+#### Files
+- Create: `src/Value/TeamId.php`, `src/Value/BundleId.php`, `src/Value/AppIdentity.php`,
+  `src/Value/Environment.php`, `src/Value/AttestedKey.php`
+- Create: `src/Exception/AppAttestException.php`, `src/Exception/AttestationException.php`,
+  `src/Exception/AttestationFailureReason.php`, `src/Exception/AssertionException.php`,
+  `src/Exception/AssertionFailureReason.php`
+- Create: `src/TrustAnchor.php`, `resources/Apple_App_Attestation_Root_CA.pem`
+- Create: `tests/TrustAnchorTest.php`, `tests/Value/TeamIdTest.php`, `tests/Value/BundleIdTest.php`,
+  `tests/Value/AppIdentityTest.php`, `tests/Value/AttestedKeyTest.php`, `tests/Exception/ExceptionsTest.php`,
+  `tests/Value/EnvironmentTest.php`
+
+Layout, iridium-style: the verifiers, `TrustAnchor` and `SystemClock` at the root of `src/`; value
+objects in `Value/`; exceptions and their reason enums in `Exception/`; implementation details in
+`Internal/` (Task 4).
+
+#### Steps
+- [x] `TeamId` (readonly, `public string $value`): exactly 10 characters of `A-Z0-9`, else
+      `InvalidArgumentException`
+- [x] `BundleId` (readonly, `public string $value`): non-empty, only `A-Za-z0-9`, `-` and `.`, else
+      `InvalidArgumentException`
+- [x] `AppIdentity(TeamId $teamId, BundleId $bundleId)` with `appId()` = `"<teamId>.<bundleId>"` and
+      `rpIdHash()` = SHA-256 of it (raw bytes); with valid parts it cannot be invalid, so it validates
+      nothing itself
+- [x] `Environment` enum (`production`, `development`) with the `aaguid` each stands for: `appattest`
+      followed by seven zero bytes, and `appattestdevelop`; `Environment::tryFromAaguid()` maps an aaguid
+      back for Task 4
+- [x] `AttestedKey` (readonly): `keyId` (raw 32 bytes), `publicKeyPem`, `environment`, `receipt` (raw
+      bytes), `counter` (always 0 from an attestation), and `keyIdBase64Url()` — the key id as unpadded
+      base64url, for callers that store or index it as text
+- [x] `AppAttestException` is `abstract` and extends `RuntimeException`, so one `catch` covers both
+      verifiers; `AttestationException` and `AssertionException` (`final`) extend it and carry
+      `public readonly AttestationFailureReason $reason` / `public readonly AssertionFailureReason $reason`
+      and a message naming the check. Attestation reasons: `Format`, `CertificateChain`, `Nonce`,
+      `KeyId`, `RpIdHash`, `Counter`, `Environment`; assertion reasons: `Format`, `Signature`,
+      `RpIdHash`, `Counter` — exactly the cases in the public API below
+- [x] `TrustAnchor::apple()` loads the bundled root and **checks its SHA-256 fingerprint against the
+      constant on every load**, throwing a `LogicException` on a mismatch; `TrustAnchor::fromPem()` exists
+      for the tests' own chains. The constant sits beside the file with a comment saying where it came
+      from and when it was fetched. The check itself is the `@internal` `TrustAnchor::fromPinnedPem($pem,
+      $sha256)`, which the tamper test calls; PEM is decoded to DER without `openssl_x509_read`, which
+      warns on garbage, and `fromPem()` parses with phpseclib in DER mode (plan execution, 2026-10-09)
+- [x] Psalm's `findUnusedCode` would flag public API members only consumers use (`AttestedKey::$receipt`,
+      `AttestedKey::keyIdBase64Url()`, `TrustAnchor::fromPem`): mark public API classes `@psalm-api`
+      rather than inventing test reads
+- [x] tests: the bundled root's fingerprint equals the constant; a tampered PEM handed to the loader's
+      check fails; `AppIdentity::rpIdHash()` for the neutral `ABCDE12345.com.example.app` equals a
+      pinned value; team ids that are short, long, lowercase or contain punctuation and bundle ids that
+      are empty or contain a space or `_` are refused; `keyIdBase64Url()` round-trips through
+      `sodium_base642bin` and has no padding; each exception carries the reason it was built with and is
+      an `AppAttestException`
+- [x] validation commands pass
+
+### Task 3: Golden vectors and the test-only builders
+
+#### Files
+- Create: `tests/fixtures/attestation/*`, `tests/fixtures/assertion/*`, `tests/fixtures/README.md`,
+  `tests/fixtures/LICENSE-*` (the references' licenses, and veehaitch's `NOTICE` if any)
+- Create: `tests/Fixtures.php` (loads a vector: bytes, team id, bundle id, key id, challenge or
+  `clientDataHash`, the time it is valid at, the expected result)
+- Create: `tests/Support/AttestationBuilder.php`, `tests/Support/AssertionBuilder.php`
+- Create: `tests/FixturesTest.php`, `tests/Support/BuildersTest.php`
+
+#### Steps
+- [x] collect every **genuine** attestation and assertion vector the two references test with, as files,
+      each with a JSON sidecar naming its inputs, how its `clientDataHash` was formed (SHA-256 of a UTF-8
+      challenge string, or a raw value — consumers need to know which), its environment, and the time to
+      verify it at. Binary values in the sidecars (key id, `clientDataHash`, expected counter bytes) are
+      unpadded base64url, converted from whatever the reference used; the vector files themselves stay
+      byte-for-byte as the references ship them. Genuine vectors are used **only unchanged**
+      ⚠️ The references ship their vectors base64-encoded inside multi-document YAML
+      (`veehaitch`) and a Go string constant (`takimoto3`), not as files of their own: each vector is
+      stored as `<name>.cbor`, the exact decoded bytes, and the reference files are copied byte-for-byte
+      to `tests/fixtures/source/`; `FixturesTest` checks that each `.cbor` file's base64 appears verbatim
+      in its copy. Collected: 8 attestations and 7 assertions. `veehaitch` (commit `cb26211f`) gives 7 of
+      each, all development builds; `takimoto3` (commit `9d7551c0`) adds one attestation, Apple's
+      published validation-guide sample (production, newer extensions); its `testdata/ios-14.4.json`
+      and inline constants hold the same bytes as `veehaitch`'s `ios-14.4` and are not collected twice.
+      The counter is a JSON integer, not bytes (plan execution, 2026-10-09)
+      ⚠️ The Apple-guide vector's nonce is formed from the **raw** 24-byte challenge
+      `example_server_challenge`, not its SHA-256, as Apple's guide shows: Task 4 must not require a
+      32-byte `clientDataHash`. The guide gives no time: `verifyAt` is inferred as one day after the
+      credential certificate's `notBefore`. Its `authData` carries an extensions map after the COSE key
+      although the ED flag is clear, so the parser must not reject trailing bytes (plan execution, 2026-10-09)
+- [x] `Fixtures` hands each vector's time to the verifier as a Symfony `MockClock`
+- [x] failure cases that genuine vectors reach through the verifier's inputs are listed, not built
+      (Task 4 uses them): `Nonce` — another `clientDataHash`; `KeyId` — another key id; `RpIdHash` —
+      another `AppIdentity`; `Environment` — `allowed` without the vector's environment;
+      `CertificateChain` — a clock past the leaf's validity, or another `TrustAnchor`; `Format` —
+      garbage, a wrong `fmt`, a missing `x5c`, a truncated `authData`
+      ⚠️ Only garbage is reachable without re-encoding a genuine vector; the builder makes the wrong
+      `fmt`, missing `x5c` and truncated `authData` (`withFormat`, `withoutCertificates`,
+      `withAuthDataTruncatedTo`). The list lives in `tests/fixtures/README.md` (plan execution, 2026-10-09)
+- [x] `AttestationBuilder` (test code, never shipped) makes what genuine vectors cannot: a root, an
+      intermediate CA and a leaf on P-256, signed with phpseclib; the nonce extension on the leaf as DER
+      `SEQUENCE { [1] EXPLICIT OCTET STRING }`; `authData` with any `rpIdHash`, counter, `aaguid` and
+      `credentialId`; the CBOR document encoded with cbor-php's encoder. Its attestations verify against
+      `TrustAnchor::fromPem()` of its own root. It covers the cases no input can trigger: a non-zero
+      counter (`Counter`), a `credentialId` differing from the key id (`KeyId`), a **production** `aaguid`
+      accepted and refused (the references' vectors may all be development builds — record in the
+      sidecars which they are), a chain whose intermediate is not a CA (`CertificateChain`), and a missing
+      nonce extension (`Nonce`)
+      ⚠️ phpseclib does **not** check CA status: `validateSignature()`'s `$caonly` only requires the issuer
+      to be among the loaded CAs, and `loadCA()`'s `basicConstraints` check is commented out. Task 4 must
+      check the intermediate's `basicConstraints` `cA` itself; `BuildersTest` shows a non-CA intermediate
+      still passes `validateSignature()`. phpseclib also fetches `caIssuers` URLs from an
+      `authorityInfoAccess` extension, so Task 4 must call `X509::disableURLFetch()` (no network)
+      ⚠️ The builder writes the nonce extension through `X509::registerExtension()`, which is global:
+      once registered, phpseclib decodes the extension into `['nonce' => …]` for every certificate it
+      loads. Task 4's verifier must register the identical map (move `AttestationBuilder::NONCE_EXTENSION_MAP`
+      to `src/Internal/` and point the builder at it), or it would see a decoded array in tests and a raw
+      string in production (plan execution, 2026-10-09)
+- [x] `AssertionBuilder` (test code) generates a P-256 key and signs `authenticatorData ‖
+      SHA-256(clientData)` for any `rpIdHash`, counter and `clientData`, CBOR-encoding
+      `{signature, authenticatorData}` — the same recipe consumers use for their own tests
+      ⚠️ Corrected in Task 5: the genuine vectors are signed over the nonce
+      SHA-256(`authenticatorData ‖ SHA-256(clientData)`), with ECDSA over SHA-256 on top, so the builder
+      now signs the nonce (plan execution, 2026-10-09)
+- [x] `tests/fixtures/README.md` lists each vector's origin (repository, commit, path) and license
+- [x] tests: every sidecar parses, its base64url fields decode, and it names an existing file; a builder
+      attestation verifies with the builder's root (a smoke check of the builders themselves)
+- [x] validation commands pass
+
+### Task 4: `AttestationVerifier`
+
+#### Files
+- Create: `src/AttestationVerifier.php`, `src/Internal/Cbor.php`, `src/Internal/AuthenticatorData.php`,
+  `src/Internal/CertificateChain.php`, `src/Internal/EcPoint.php`
+- Create: `tests/AttestationVerifierTest.php`
+- ➕ Create: `src/Internal/NonceExtension.php` (the nonce extension's OID and ASN.1 map, shared with
+  `AttestationBuilder`), `src/Internal/ErrorGuard.php` (turns PHP warnings from parsing untrusted bytes
+  into exceptions); Modify: `tests/Support/AttestationBuilder.php`, `phpunit.xml.dist` (`failOnWarning`,
+  `failOnNotice`) (plan execution, 2026-10-09)
+- ➕ Create: `src/Internal/CborText.php`, `src/Internal/CborMap.php`, `src/Internal/Pem.php`,
+  `src/Internal/Der.php`, `tests/Support/Tagged.php`, `tests/Support/HostileInput.php` (review rounds,
+  2026-10-09)
+
+#### Steps
+- [x] `verify(attestationCbor, clientDataHash, keyId, app, allowed)` in Apple's order, each failure an
+      `AttestationException` with the reason named:
+      1. decode CBOR `{fmt: "apple-appattest", attStmt: {x5c, receipt}, authData}` — any decoder
+         exception, a wrong `fmt`, a missing member or a short `authData` is `Format`;
+         ⚠️ Tightened after the Codex review: the document must be exactly one CBOR map with nothing
+         after it; byte strings decode to strings and text strings to `Internal\CborText`, so `fmt` must
+         be text and `x5c`'s entries, `receipt`, `authData`, `signature` and `authenticatorData` bytes;
+         maps decode to `Internal\CborMap`, so a map keyed "0", "1" is not a list; a key that is not a
+         text string, or a key twice, in any map refuses the document as `Format` (review, 2026-10-09)
+         ⚠️ An attestation longer than 16384 bytes (genuine ones are 5.3 to 5.9 KB) and an assertion
+         longer than 4096 bytes (genuine ones are about 140) are `Format` before decoding: cbor-php
+         spends about 220 bytes of memory per input byte, so a document of about 600 KB ended the
+         process with an uncatchable out-of-memory error (review, 2026-10-09)
+      2. `x5c` holds **exactly two** certificates (credential, intermediate); build the chain to the
+         trust anchor with phpseclib, each certificate valid at the clock's time, the intermediate a CA
+         (its `basicConstraints` `cA` flag, checked by the library itself) — else `CertificateChain`;
+         ⚠️ phpseclib's `validateSignature()` does **not** check CA status (the `basicConstraints` check in
+         `loadCA()` is commented out), so `CertificateChain` reads the intermediate's `cA` flag itself; it
+         also calls `X509::disableURLFetch()`, since phpseclib would otherwise fetch `caIssuers` URLs.
+         phpseclib warns on malformed DER, so all its parsing runs under `ErrorGuard` (plan execution,
+         2026-10-09)
+      3. nonce = SHA-256(`authData` ‖ `clientDataHash`) must equal (`hash_equals`) the 32-byte octet
+         string inside the credential certificate's extension `1.2.840.113635.100.8.2`, read through
+         its ASN.1 layout (Context); an absent or malformed extension is `Nonce`;
+      4. key id = SHA-256 of the credential certificate's **raw 65-byte uncompressed EC point** — the
+         BIT STRING contents of its SubjectPublicKeyInfo (for P-256 the last 65 bytes of the 91-byte DER),
+         **not** `openssl_pkey_get_details()`'s `x`/`y`, which drop leading zero bytes and would give a
+         wrong id for about one key in 128. Assert 65 bytes, first byte `0x04`, curve `prime256v1` (else
+         `Format`); the id must equal `keyId` — else `KeyId`;
+      5. `authData`'s `rpIdHash` = `app->rpIdHash()` — else `RpIdHash`;
+      6. counter = 0 — else `Counter`;
+      7. `aaguid` names an environment in `allowed` — else `Environment`;
+      8. `credentialId` = key id — else `KeyId`
+
+      ⚠️ `clientDataHash` may be any length (Apple's guide vector uses the raw 24-byte challenge), and
+      `authData` may carry bytes after the credential public key (that vector's extensions map, with ED
+      clear): the parser requires the layout up to the credentialId and at least one byte of key, and
+      interprets nothing after it. The nonce extension map lives in `Internal\NonceExtension`, registered
+      by both the verifier and the builder. The CBOR decoder keeps only strings, lists and maps, so an
+      integer or a tag where a byte string belongs is `Format` (plan execution, 2026-10-09)
+- [x] newer extensions on the credential certificate (`apple_validation_category_01`,
+      `apple_bundle_version_01` and any unknown one) are ignored, never required
+      ⚠️ These are not certificate extensions but entries of the `extensions` CBOR map in `authData`;
+      ➕ Task 7 reads them and enforces them on request (plan execution, 2026-10-09)
+- [x] returns `AttestedKey` with the public key as PEM, the environment, the receipt bytes and counter 0
+- [x] tests: every genuine vector accepted with the expected key; each input-triggered failure (Task 3's
+      list) and each builder-made failure raises its own reason; production accepted and refused through
+      the builder; a garbage document is `Format`, never a PHP warning; a key whose `x` coordinate starts
+      with a zero byte (the builder generates keys until one does) gets the right id
+- [x] validation commands pass
+
+### Task 5: `AssertionVerifier`
+
+#### Files
+- Create: `src/AssertionVerifier.php`
+- Create: `tests/AssertionVerifierTest.php`
+- ➕ Create: `tests/Support/AssertionParts.php` (a decoded assertion's two members, for tests that
+  reassemble one); Modify: `tests/Support/AssertionBuilder.php`, `tests/Support/BuildersTest.php` (the
+  builder signs the nonce) (plan execution, 2026-10-09)
+- ➕ Create: `src/Value/VerifiedAssertion.php`, `tests/Value/VerifiedAssertionTest.php`; Modify:
+  `src/Value/ValidationCategory.php`, `src/Value/AttestedKey.php`, `src/Value/LaunchPolicy.php`,
+  `tests/Value/ValidationCategoryTest.php` (the result object, maintainer's request, 2026-10-09)
+
+#### Steps
+- [x] `verify(assertionCbor, clientData, publicKeyPem, previousCounter, app)`: reject an unparsable PEM or
+      a `previousCounter` outside 0..2^32−1 with `InvalidArgumentException`; then, each failure an
+      `AssertionException` with the reason named: decode CBOR `{signature, authenticatorData}` (a decoder
+      exception, a missing member or an `authenticatorData` shorter than 37 bytes is `Format`); verify
+      the ECDSA P-256 signature with
+      `openssl_verify(authenticatorData ‖ SHA-256(clientData), signature, key, OPENSSL_ALGO_SHA256)` —
+      pass the concatenation, **not** its hash, or it is hashed twice — accepted only when the result is
+      `=== 1`, else `Signature`; `rpIdHash` = `app->rpIdHash()` — else `RpIdHash`; the counter (read
+      with `unpack('N', …)`) strictly greater than `previousCounter` — else `Counter`; return the new
+      counter
+      ⚠️ The "concatenation, not its hash" instruction is wrong: every genuine vector fails it and
+      verifies only as `openssl_verify(nonce, signature, key, OPENSSL_ALGO_SHA256)` with nonce =
+      SHA-256(`authenticatorData ‖ SHA-256(clientData)`), as Apple's step 3 says ("valid for nonce"): the
+      device signs the nonce, so it is hashed twice. A signature over the bare concatenation is refused
+      with `Signature`, and a test pins that. The PEM is accepted only as one `PUBLIC KEY` block holding an
+      uncompressed P-256 SubjectPublicKeyInfo (what `AttestedKey::$publicKeyPem` returns), decoded by the
+      library itself and checked with `Internal\EcPoint`, so a path such as `file://…`, a certificate, a
+      private key, an RSA or P-384 key, or a point off the curve is an `InvalidArgumentException` and
+      OpenSSL never reads a file. `authenticatorData` longer than 37 bytes is not refused; only its first
+      37 are read (plan execution, 2026-10-09). Since ➕ Task 7 the bytes after the 37 are read as the
+      extensions area, and only a policy enforces them.
+      ⚠️ The return type changed at the maintainer's request on 2026-10-09, before `v1.0.0` was tagged:
+      `verify()` returns a `final readonly` `Value\VerifiedAssertion` with `int $counter`, the raw
+      `?int $validationCategory` (an unknown number is still reported), `?string $bundleVersion` and
+      `validationCategory(): ?ValidationCategory`, instead of the bare counter. The raw category is mapped
+      by `ValidationCategory::tryFromRaw()`, which `AttestedKey` and `LaunchPolicy` use as well. With a
+      policy the values are enforced, without one only reported
+- [x] `clientData` is the caller's raw bytes; the library never parses it (what it contains is the
+      caller's protocol — Apple's assertion step 6, checking the challenge inside it, is the caller's)
+- [x] tests: every genuine vector accepted with its counter (and, since the result object, with no launch
+      values); builder assertions accepted; a flipped
+      signature byte; a foreign key; another bundle; an equal and a lower previous counter; a garbage
+      document; an invalid PEM and a negative counter are `InvalidArgumentException`
+- [x] validation commands pass
+
+### Task 6: Documentation, repository metadata and the first release
+
+#### Files
+- Modify: `README.md`, `CHANGELOG.md`, `CLAUDE.md`
+
+#### Steps
+- [x] README: what App Attest is in two paragraphs; installation; registration and assertion examples,
+      in which the client sends the key id, attestation and assertion as unpadded base64url and the
+      server decodes them with `sodium_base642bin(…, SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING)` (noting
+      that Apple's `generateKey()` returns the key id in standard base64, so the client converts it);
+      the exception hierarchy, the failure reasons and the `$reason` property; **what the caller must do
+      itself** — issue single-use challenges; compute `clientDataHash` the way its client does; store
+      the key, environment and counter; **verify that the challenge inside `clientData` is one it issued
+      and consume it (Apple's assertion step 6)**; update the counter atomically so two concurrent
+      assertions cannot both pass; why development keys are safe to accept (the `rpIdHash` ties a key
+      to the team and bundle); that any PSR-20 clock can be passed (Symfony's included); the test
+      builders' recipe for consumers who need their own assertions; credits and licenses of the two
+      references
+      ⚠️ The test builders are export-ignored, so the README gives the assertion recipe as code consumers
+      copy (signing the nonce SHA-256(`authenticatorData` ‖ SHA-256(`clientData`)), as corrected in Task 5)
+      and links to `AttestationBuilder` on GitHub for attestations. It also documents what the code does
+      beyond the plan's list: `clientDataHash` of any length, the stored PEM passed unchanged (one
+      uncompressed P-256 `PUBLIC KEY` block, never a path or a certificate), `LogicException` from
+      `TrustAnchor::apple()`, and the process-wide phpseclib settings (`X509::disableURLFetch()` and the
+      registered nonce extension map). Every example was run against a genuine vector on PHP 8.5 and 8.3
+      (plan execution, 2026-10-09)
+- [x] `CHANGELOG.md` `1.0.0`; `CLAUDE.md` with the conventions, the 8-bit rule (and why: the code style's
+      `mb_str_functions`), the import rule, the base64url rule, `openssl_verify === 1`, and the
+      "verification only, no state, no I/O" rule
+- [x] repository metadata through `gh repo edit Oire/app-attest`: `--description "Verify Apple App Attest
+      attestations and assertions in PHP: certificate chain, nonce, key id, counter. Stateless, no I/O."`,
+      `--homepage https://packagist.org/packages/oire/app-attest`, and `--add-topic` for `php`,
+      `app-attest`, `apple`, `ios`, `devicecheck`, `attestation`, `security`, `cbor`, `x509`,
+      `php-library`; confirm with `gh repo view Oire/app-attest --json description,homepageUrl,repositoryTopics`
+- [x] validation commands pass
+
+### ➕ Task 7: Launch category and bundle version (opt-in)
+
+Added during plan execution (2026-10-09) after a Codex review. Apple's "Validating apps that connect to
+your server" ends its attestation steps with "Verify the `apple_validation_category_01` value" and
+"Verify the `apple_bundle_version_01` value", both "within the `extensions` CBOR dictionary in the
+authenticator data", and its assertion steps 7 and 8 name `validationCategory` and `bundleVersion` the
+same way. Task 4 assumed these were certificate extensions to ignore; they are entries in the authData
+`extensions` map, after the COSE key. Only Apple's guide sample (`takimoto3-apple-guide`) carries them:
+`apple_validation_category_01` as a 4-byte little-endian byte string (`01 00 00 00`) and
+`apple_bundle_version_01` as the text string `"1"`, with the ED flag clear. No iOS 14 vector has them, and
+Apple publishes no assertion sample with them. The maintainer chose to report them and enforce them only on
+request, so every existing call keeps its behavior.
+
+#### Files
+- Create: `src/Value/ValidationCategory.php`, `src/Value/LaunchPolicy.php`
+- Modify: `src/Value/AttestedKey.php`, `src/AttestationVerifier.php`, `src/AssertionVerifier.php`,
+  `src/Internal/AuthenticatorData.php` (and `Cbor` if needed), both reason enums
+- Modify: `tests/Support/AttestationBuilder.php`, `tests/Support/AssertionBuilder.php`, the verifier tests
+- Modify: `README.md`, `CHANGELOG.md`, `CLAUDE.md`
+- ➕ Create: `src/Internal/CborStream.php` (the decoder's input, telling how many bytes it read),
+  `src/Internal/Extensions.php` (reads the launch values from the extensions area),
+  `tests/Support/ExtensionsMap.php` (encodes extension maps for the builders), `tests/Value/LaunchPolicyTest.php`,
+  `tests/Value/ValidationCategoryTest.php`; Modify: `src/Internal/CborMap.php`, `tests/Support/BuildersTest.php`,
+  `tests/Exception/ExceptionsTest.php`, `tests/Value/AttestedKeyTest.php` (plan execution, 2026-10-09)
+
+#### Steps
+- [x] `authData` parsing goes past the COSE key: decode the credential public key as one CBOR item, then
+      at most one CBOR map of extensions, whatever the ED flag says (Apple's sample has it clear). Bytes
+      that are neither stay ignored as before; an extensions area that is not one well-formed map yields
+      no values rather than a failure, unless a policy needs them. The assertion `authenticatorData` is
+      read the same way after its 37 bytes, accepting the keys `validationCategory` and `bundleVersion`
+      as well as the `apple_…_01` spellings
+      ⚠️ `Cbor::tryItemLength()` decodes the COSE key through `Internal\CborStream` and returns the bytes
+      it took (any content, integer keys included); everything after it is the extensions area, read with
+      the strict `Cbor::tryDecodeMap()`, so it yields values only when it is exactly one map with distinct
+      text-string keys and nothing after it. After review, a nested map in another entry may have keys of
+      any type (`lenientNestedMaps`): it becomes null instead of hiding the launch values. Both
+      verifiers accept both spellings; when both hold a usable value, the `apple_…_01` one wins. The
+      decoder now keeps unsigned integers that fit a PHP int, which cannot pass for any document member.
+      `AuthenticatorData`, `Extensions` and `LaunchPolicy` are `readonly` but not `@psalm-immutable`: the
+      decoder runs under `ErrorGuard` and the bundle version closure is the caller's, both impure
+      (plan execution, 2026-10-09)
+      ⚠️ After Codex review C3-1, the credential public key must decode as exactly one CBOR map (a COSE
+      key): `Cbor::tryMapLength()` replaces `Cbor::tryItemLength()`, and a key that is not CBOR, is a
+      list, a byte string or another non-map item, is tagged, or is truncated makes the attestation
+      `Format` instead of being read as "no extensions". All 8 genuine attestations, the Apple guide vector
+      included, carry a definite-length map `{1: 2, 3: -7, -1: 1, -2: x, -3: y}` whose x and y equal the
+      certificate's point. The map is deliberately **not** matched against the certificate's key: Apple's
+      steps do not ask for it, the nonce already binds `authData` to the certificate Apple signed (so only
+      Apple could produce a mismatch), and the check would need a COSE reader for the integer and negative
+      integer keys the strict decoder refuses, plus a failure reason. A damaged key that still decodes as
+      a map, for example one that absorbs the extensions' first bytes, is therefore accepted, its
+      extensions read leniently. The extensions rules after the key are unchanged (Codex review,
+      2026-10-09)
+- [x] values: the category is a `UInt32` given either as a 4-byte little-endian byte string (Apple's
+      sample) or as a CBOR unsigned integer; the bundle version is a text string. Anything else counts as
+      absent
+- [x] `ValidationCategory`, an int-backed enum with Apple's launch-constraint numbering (confirm it from
+      Apple's "Defining launch environment and library constraints": 1 platform, 2 TestFlight,
+      3 development, 4 App Store, 5 enterprise or ad hoc, 6 Developer ID, 7 to 9 restricted, 10 none;
+      name the restricted ones as Apple does)
+      ⚠️ Confirmed from Apple's documentation JSON (2026-10-09): the numbering is as listed, and Apple names
+      7 to 9 nowhere ("aren't appropriate for `validation-category` facts in constraints as they represent
+      categories of binaries that the system generates in certain restricted situations"); its Swift
+      `LightweightCodeRequirements.ValidationCategory.Value` has only `platform`, `testflight`,
+      `development`, `appStore`, `enterprise`, `developerID` and `none`. So the cases are `Platform` 1,
+      `TestFlight` 2, `Development` 3, `AppStore` 4, `Enterprise` 5, `DeveloperId` 6 and `None` 10, with no
+      case for 7 to 9: `AttestedKey::$validationCategory` still reports them, and no policy can allow them
+      (plan execution, 2026-10-09)
+- [x] `AttestedKey` gains trailing, defaulted `?int $validationCategory` (raw value, so an unknown number
+      is still reported) and `?string $bundleVersion`, plus a `validationCategory(): ?ValidationCategory`
+      helper or equivalent; existing constructor calls keep working
+- [x] `LaunchPolicy` (final readonly, `@psalm-api`): a list of allowed `ValidationCategory` cases (empty
+      means "do not check the category") and an optional `Closure(string): bool` for the bundle version
+      (null means "do not check it"); named constructors or a fluent builder for the common cases
+      ⚠️ `LaunchPolicy::allowing(...)` and `withBundleVersion()`, plus `allowsValidationCategory(?int)` and
+      `acceptsBundleVersion(?string)`, which both verifiers call; the closure passes only when it returns
+      `true`, and a category list entry that is not a `ValidationCategory` is an
+      `InvalidArgumentException` (plan execution, 2026-10-09)
+      ⚠️ `allowing()` with no category is an `InvalidArgumentException`, so an empty configuration spread
+      into it cannot turn the check off; the constructor's empty list still means "not checked"
+      (review, 2026-10-09)
+- [x] both `verify()` methods take a trailing `?LaunchPolicy $launchPolicy = null`. With null, nothing
+      changes. With a policy, a category that is absent, unknown or not allowed is the new reason
+      `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
+      `BundleVersion`; both run after every existing check. Add both cases to `AttestationFailureReason`
+      and `AssertionFailureReason`
+      ⚠️ At first only `AttestationVerifier` reported the values (on `AttestedKey`), and
+      `AssertionVerifier::verify()` returned the counter, so on the assertion side they were enforced but
+      not visible (review, 2026-10-09). The return type changed at the maintainer's request on
+      2026-10-09: `AssertionVerifier::verify()` returns `VerifiedAssertion`, which reports them like
+      `AttestedKey` (Task 5)
+- [x] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
+      into `authData` and `authenticatorData`
+- [x] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
+      allowing `1`, refused with `ValidationCategory` by an App Store-only policy and with `BundleVersion`
+      by a closure wanting `"2.0"`; an iOS 14 vector reports nulls, verifies without a policy and fails with
+      a policy; builder attestations and assertions cover both encodings, an unknown category, a malformed
+      map and a missing value; every existing test still passes unchanged
+- [x] README: what the two values are, Apple's wording, that only newer OS versions send them, the
+      opt-in policy with an example, and that no genuine assertion sample with them exists. CHANGELOG
+      1.0.0 and CLAUDE.md updated. Task 4's sentence about "newer extensions on the credential certificate"
+      gets a ⚠️ note pointing here
+- [x] validation commands pass
+
+## Technical details
+
+### Public API
+
+⚠️ Updated after review to match the code: the classes are `final readonly`, and the sketch now lists the
+members added during implementation (plan execution, 2026-10-09). ➕ Task 7 adds the trailing
+`?LaunchPolicy $launchPolicy` argument, `ValidationCategory`, `LaunchPolicy`, the launch values on
+`AttestedKey` and the `ValidationCategory` and `BundleVersion` reasons. ⚠️ `AssertionVerifier::verify()`
+returns `VerifiedAssertion` instead of the counter, at the maintainer's request (2026-10-09).
+
+```php
+namespace Oire\AppAttest;
+
+use Psr\Clock\ClockInterface;
+
+final readonly class AttestationVerifier {
+    public function __construct(?TrustAnchor $root = null, ?ClockInterface $clock = null);
+    /** @param list<Environment> $allowed  @throws AttestationException */
+    public function verify(string $attestationCbor, string $clientDataHash, string $keyId,
+                           AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey;
+}
+
+final readonly class AssertionVerifier {
+    /** @throws InvalidArgumentException  @throws AssertionException */
+    public function verify(string $assertionCbor, string $clientData, string $publicKeyPem,
+                           int $previousCounter, AppIdentity $app,
+                           ?LaunchPolicy $launchPolicy = null): VerifiedAssertion;
+}
+
+final readonly class TrustAnchor {
+    public const string APPLE_ROOT_SHA256; // lowercase hexadecimal
+    public string $pem;
+    public static function apple(): self;
+    public static function fromPem(string $pem): self;
+    /** @internal */ public static function fromPinnedPem(string $pem, string $sha256Fingerprint): self;
+}
+
+final readonly class SystemClock implements ClockInterface {}
+```
+
+```php
+namespace Oire\AppAttest\Value;
+
+final readonly class TeamId { public function __construct(public string $value) } // 10 × A-Z0-9
+final readonly class BundleId { public function __construct(public string $value) } // A-Za-z0-9 - .
+final readonly class AppIdentity {
+    public function __construct(TeamId $teamId, BundleId $bundleId);
+    public function appId(): string;    // <team id>.<bundle id>
+    public function rpIdHash(): string; // SHA-256 of appId(), raw bytes
+}
+enum Environment: string {
+    case Production = 'production'; case Development = 'development';
+    public function aaguid(): string;
+    public static function tryFromAaguid(string $aaguid): ?self;
+}
+final readonly class AttestedKey {
+    public function __construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt,
+                                ?int $validationCategory = null, ?string $bundleVersion = null);
+    string $keyId; string $publicKeyPem; Environment $environment; string $receipt; int $counter; // 0
+    ?int $validationCategory; ?string $bundleVersion; // null if absent
+    public function validationCategory(): ?ValidationCategory; // null if absent or unnamed
+    public function keyIdBase64Url(): string;
+}
+final readonly class VerifiedAssertion {
+    public function __construct(int $counter, ?int $validationCategory = null, ?string $bundleVersion = null);
+    int $counter; // the new counter, to store
+    ?int $validationCategory; ?string $bundleVersion; // null if absent
+    public function validationCategory(): ?ValidationCategory; // null if absent or unnamed
+}
+enum ValidationCategory: int {
+    case Platform = 1; case TestFlight = 2; case Development = 3; case AppStore = 4;
+    case Enterprise = 5; case DeveloperId = 6; case None = 10; // 7-9: unnamed by Apple, no case
+    public static function tryFromRaw(?int $value): ?self; // null if absent or unnamed
+}
+final readonly class LaunchPolicy {
+    /** @param list<ValidationCategory> $validationCategories  @param ?Closure(string): bool $acceptsBundleVersion */
+    public function __construct(array $validationCategories = [], ?Closure $acceptsBundleVersion = null);
+    array $validationCategories; ?Closure $acceptsBundleVersion; // empty / null: not checked
+    public static function allowing(ValidationCategory ...$categories): self;
+    public function withBundleVersion(Closure $accepts): self;
+    public function allowsValidationCategory(?int $category): bool;
+    public function acceptsBundleVersion(?string $bundleVersion): bool;
+}
+```
+
+```php
+namespace Oire\AppAttest\Exception;
+
+use RuntimeException;
+
+abstract class AppAttestException extends RuntimeException {}
+final class AttestationException extends AppAttestException { public readonly AttestationFailureReason $reason; }
+enum AttestationFailureReason { case Format; case CertificateChain; case Nonce; case KeyId; case RpIdHash; case Counter; case Environment; case ValidationCategory; case BundleVersion; }
+final class AssertionException extends AppAttestException { public readonly AssertionFailureReason $reason; }
+enum AssertionFailureReason { case Format; case Signature; case RpIdHash; case Counter; case ValidationCategory; case BundleVersion; }
+```
+
+`$keyId` and `$clientDataHash` are raw bytes; callers decode their transport encoding — base64url, as
+the README recommends — before calling. Apple's `generateKey()` hands the app its key id in standard
+base64; converting it is the client's job. A malformed `$publicKeyPem`, a `$previousCounter` outside
+0..2^32−1, an `$allowed` that is empty or not of `Environment` cases, or an invalid `TeamId` or `BundleId`
+is an `InvalidArgumentException` (a caller error), never an `AppAttestException`. The library keeps no
+state: storage, challenges and the counter race are the caller's.
+
+## Post-completion
+
+- `Oire/app-attest` exists on GitHub (public, Apache-2.0, created 2026-10-08); push and confirm CI is
+  green.
+- Tag `v1.0.0` and push the tag; confirm the release workflow created the GitHub Release.
+- Submit the package: sign in at https://packagist.org, choose **Submit**, enter
+  `https://github.com/Oire/app-attest`, and confirm.
+- Add the Packagist webhook so pushes and tags update the package without clicking **Update**:
+  1. On https://packagist.org/profile/ note your username and click **Show Safe API Token**. Use the
+     **Safe** token: the GitHub hook endpoint accepts it (Packagist's `ApiController` checks the
+     signature against both tokens), and it only reaches safe APIs such as package updates, so a leak
+     is harmless; the main API token can also create and edit packages.
+  2. Either on GitHub (`Oire/app-attest` → Settings → Webhooks → Add webhook: Payload URL
+     `https://packagist.org/api/github?username=<username>`, Content type `application/json`, Secret
+     the Safe API token, "Just the push event", Active), or in your own terminal:
+     `gh api repos/Oire/app-attest/hooks -f name=web -f "config[url]=https://packagist.org/api/github?username=<username>" -f "config[content_type]=json" -f "config[secret]=<token>" -F active=true -f "events[]=push"`
+  3. Check: the hook's **Recent Deliveries** shows a 2xx response after the next push, and the package
+     page on Packagist no longer warns that it is not auto-updated.
+- Tell AccessMind the version to require.
+- Before a later release: re-fetch Apple's root and compare its fingerprint with the constant.
+- When PHP 8.3 reaches end of life (2027-12-31): drop it from the CI matrix and raise `"php"` and
+  `config.platform.php` to 8.4 in a minor release.
