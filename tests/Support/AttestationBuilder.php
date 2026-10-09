@@ -21,7 +21,9 @@ use phpseclib4\Crypt\RSA;
 use phpseclib4\Crypt\RSA\PublicKey as RsaPublicKey;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Element;
+use phpseclib4\File\ASN1\Types\OctetString;
 use phpseclib4\File\X509;
+use phpseclib4\Math\BigInteger;
 use RuntimeException;
 
 /**
@@ -50,6 +52,9 @@ final class AttestationBuilder
     public const string DEFAULT_TIME = '2026-01-15T12:00:00Z';
     public const string RECEIPT = 'oire-test-receipt';
     public const string FORMAT = 'apple-appattest';
+    public const string KEY_USAGE_OID = '2.5.29.15';
+    public const string SUBJECT_KEY_IDENTIFIER_OID = '2.5.29.14';
+    public const string AUTHORITY_KEY_IDENTIFIER_OID = '2.5.29.35';
     private const int FLAGS = 0x40;
     private const string NONCE_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
 
@@ -59,6 +64,18 @@ final class AttestationBuilder
      */
     private const string NONCE_PLACEHOLDER_OID = '1.2.840.113635.100.8.99';
     private const string NONCE_PLACEHOLDER_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x63";
+
+    /**
+     * 2.5.29.99, as long as the OIDs of the key usage and key identifier extensions, one of which takes its
+     * place once phpseclib has written the certificate.
+     */
+    private const string REPEATED_PLACEHOLDER_OID = '2.5.29.99';
+    private const string REPEATED_PLACEHOLDER_OID_DER = "\x06\x03\x55\x1d\x63";
+    private const array REPEATABLE_OID_DER = [
+        self::KEY_USAGE_OID => "\x06\x03\x55\x1d\x0f",
+        self::SUBJECT_KEY_IDENTIFIER_OID => "\x06\x03\x55\x1d\x0e",
+        self::AUTHORITY_KEY_IDENTIFIER_OID => "\x06\x03\x55\x1d\x23",
+    ];
     private AppIdentity $app;
     private string $clientDataHash;
     private DateTimeImmutable $time;
@@ -74,6 +91,13 @@ final class AttestationBuilder
     private ?int $authDataLength = null;
     private ?string $credentialPublicKeyPem = null;
     private bool $rootExpired = false;
+    private string $intermediateNotBefore = '-1 year';
+    private string $intermediateNotAfter = '+5 years';
+    private ?BigInteger $intermediateSerialNumber = null;
+    private bool $credentialNamingAnotherKey = false;
+    private ?BigInteger $credentialAuthorityCertSerialNumber = null;
+    private ?string $intermediateExtensionTwice = null;
+    private bool $credentialAuthorityKeyIdentifierTwice = false;
     private ?string $unlistedIssuerUrl = null;
     private string $extensions = '';
     private ?string $coseKey = null;
@@ -252,6 +276,91 @@ final class AttestationBuilder
     {
         $builder = clone $this;
         $builder->rootExpired = true;
+
+        return $builder;
+    }
+
+    /**
+     * An intermediate that expired the day before the builder's time, while the root and the credential
+     * certificate are still valid.
+     */
+    public function withExpiredIntermediate(): self
+    {
+        $builder = clone $this;
+        $builder->intermediateNotBefore = '-2 years';
+        $builder->intermediateNotAfter = '-1 day';
+
+        return $builder;
+    }
+
+    /**
+     * An intermediate valid from the day after the builder's time, while the root and the credential
+     * certificate are already valid.
+     */
+    public function withIntermediateNotYetValid(): self
+    {
+        $builder = clone $this;
+        $builder->intermediateNotBefore = '+1 day';
+        $builder->intermediateNotAfter = '+5 years';
+
+        return $builder;
+    }
+
+    public function withIntermediateSerialNumber(BigInteger $serialNumber): self
+    {
+        $builder = clone $this;
+        $builder->intermediateSerialNumber = $serialNumber;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate signed by the intermediate's key under the intermediate's name, whose
+     * authority key identifier names another key.
+     */
+    public function withCredentialNamingAnotherKey(): self
+    {
+        $builder = clone $this;
+        $builder->credentialNamingAnotherKey = true;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate whose authority key identifier also names this serial number of its issuer.
+     */
+    public function withCredentialAuthorityCertSerialNumber(BigInteger $serialNumber): self
+    {
+        $builder = clone $this;
+        $builder->credentialAuthorityCertSerialNumber = $serialNumber;
+
+        return $builder;
+    }
+
+    /**
+     * An intermediate signed by the root with its key usage, or its subject key identifier, twice, with the
+     * same value both times.
+     */
+    public function withIntermediateExtensionTwice(string $oid): self
+    {
+        if ($oid !== self::KEY_USAGE_OID && $oid !== self::SUBJECT_KEY_IDENTIFIER_OID) {
+            throw new RuntimeException('Only the key usage or the subject key identifier can come twice.');
+        }
+
+        $builder = clone $this;
+        $builder->intermediateExtensionTwice = $oid;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate signed by the intermediate with its authority key identifier twice, naming
+     * the intermediate's key both times.
+     */
+    public function withCredentialAuthorityKeyIdentifierTwice(): self
+    {
+        $builder = clone $this;
+        $builder->credentialAuthorityKeyIdentifierTwice = true;
 
         return $builder;
     }
@@ -440,6 +549,15 @@ final class AttestationBuilder
         $rootDn = ['id-at-commonName' => 'Oire Test App Attestation Root CA'];
         $intermediateDn = ['id-at-commonName' => 'Oire Test App Attestation CA'];
         $intermediatePublicKeyPem = $this->intermediateKey?->getPublicKey()->toString('PKCS8') ?? $intermediateKey->publicKeyPem;
+        $intermediateExtensions = $this->intermediateExtensions();
+
+        if ($this->intermediateExtensionTwice !== null) {
+            $intermediateExtensions[self::REPEATED_PLACEHOLDER_OID] = self::octetString(match ($this->intermediateExtensionTwice) {
+                self::KEY_USAGE_OID => "\x03\x02\x01\x86",
+                default => "\x04\x14" . self::keyIdentifierOf($intermediatePublicKeyPem),
+            });
+        }
+
         $rootDer = self::certificate(
             $rootDn,
             $rootKey->publicKeyPem,
@@ -458,10 +576,20 @@ final class AttestationBuilder
             $rootKey->publicKeyPem,
             self::signer($this->intermediateSignedByAnotherKey ? EcKey::generate() : $rootKey),
             $this->intermediateIsCa,
-            $this->time->modify('-1 year'),
-            $this->time->modify('+5 years'),
-            $this->intermediateExtensions(),
+            $this->time->modify($this->intermediateNotBefore),
+            $this->time->modify($this->intermediateNotAfter),
+            $intermediateExtensions,
+            $this->intermediateSerialNumber,
         );
+
+        if ($this->intermediateExtensionTwice !== null) {
+            $intermediateDer = SignedCertificate::signed(
+                str_replace(self::REPEATED_PLACEHOLDER_OID_DER, self::REPEATABLE_OID_DER[$this->intermediateExtensionTwice], SignedCertificate::split($intermediateDer)[0]),
+                SignedCertificate::ECDSA_WITH_SHA256,
+                self::signer($rootKey),
+            );
+        }
+
         $credentialExtensions = [];
         $correctNonce = ($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce)) . $this->nonceExtensionSuffix;
 
@@ -478,6 +606,20 @@ final class AttestationBuilder
                 'accessMethod' => 'id-ad-caIssuers',
                 'accessLocation' => ['uniformResourceIdentifier' => $this->unlistedIssuerUrl],
             ]];
+        }
+
+        if ($this->credentialNamingAnotherKey || $this->credentialAuthorityCertSerialNumber !== null) {
+            $authorityKeyIdentifier = ['keyIdentifier' => new OctetString(self::keyIdentifierOf($this->credentialNamingAnotherKey ? EcKey::generate()->publicKeyPem : $intermediatePublicKeyPem))];
+
+            if ($this->credentialAuthorityCertSerialNumber !== null) {
+                $authorityKeyIdentifier['authorityCertSerialNumber'] = $this->credentialAuthorityCertSerialNumber;
+            }
+
+            $credentialExtensions['id-ce-authorityKeyIdentifier'] = $authorityKeyIdentifier;
+        }
+
+        if ($this->credentialAuthorityKeyIdentifierTwice) {
+            $credentialExtensions[self::REPEATED_PLACEHOLDER_OID] = self::octetString("\x30\x16\x80\x14" . self::keyIdentifierOf($intermediatePublicKeyPem));
         }
 
         $unlistedIssuerKey = EcKey::generate();
@@ -497,8 +639,12 @@ final class AttestationBuilder
             $credentialExtensions,
         );
 
-        if ($this->intermediateKey !== null || $this->credentialSignedAlgorithm !== null || $this->nonceExtensionTwice) {
-            $tbsCertificate = str_replace(self::NONCE_PLACEHOLDER_OID_DER, self::NONCE_OID_DER, SignedCertificate::split($credentialDer)[0]);
+        if ($this->intermediateKey !== null || $this->credentialSignedAlgorithm !== null || $this->nonceExtensionTwice || $this->credentialAuthorityKeyIdentifierTwice) {
+            $tbsCertificate = str_replace(
+                [self::NONCE_PLACEHOLDER_OID_DER, self::REPEATED_PLACEHOLDER_OID_DER],
+                [self::NONCE_OID_DER, self::REPEATABLE_OID_DER[self::AUTHORITY_KEY_IDENTIFIER_OID]],
+                SignedCertificate::split($credentialDer)[0],
+            );
             $credentialDer = SignedCertificate::signed(
                 $this->credentialSignedAlgorithm === null ? $tbsCertificate : SignedCertificate::withSignedAlgorithm($tbsCertificate, $this->credentialSignedAlgorithm),
                 SignedCertificate::ECDSA_WITH_SHA256,
@@ -593,6 +739,11 @@ final class AttestationBuilder
         return $signer->withHash($hash);
     }
 
+    private static function keyIdentifierOf(string $publicKeyPem): string
+    {
+        return (new X509(PublicKeyLoader::loadPublicKey($publicKeyPem)))->createSubjectKeyIdentifier();
+    }
+
     private static function octetString(string $der): Element
     {
         return new Element(ASN1::encodeDER($der, ['type' => ASN1::TYPE_OCTET_STRING]));
@@ -604,6 +755,7 @@ final class AttestationBuilder
      * @param string                                              $subjectPublicKeyPem an RSA key is written as rsaEncryption, not phpseclib's RSASSA-PSS
      * @param string                                              $issuerPublicKeyPem  the key the authority key identifier names
      * @param array<string, Element|array<array-key, mixed>|null> $extensions          values by extension id, null to remove one
+     * @param ?BigInteger                                         $serialNumber        phpseclib's random one if null
      */
     private static function certificate(
         array $subjectDn,
@@ -615,6 +767,7 @@ final class AttestationBuilder
         DateTimeImmutable $notBefore,
         DateTimeImmutable $notAfter,
         array $extensions = [],
+        ?BigInteger $serialNumber = null,
     ): string {
         $subjectKey = PublicKeyLoader::loadPublicKey($subjectPublicKeyPem);
         $certificate = new X509($subjectKey instanceof RsaPublicKey ? $subjectKey->withPadding(RSA::SIGNATURE_PKCS1) : $subjectKey);
@@ -622,7 +775,11 @@ final class AttestationBuilder
         $certificate->setIssuerDN($issuerDn);
         $certificate->setStartDate($notBefore);
         $certificate->setEndDate($notAfter);
-        $certificate->setAuthorityKeyIdentifier((new X509(PublicKeyLoader::loadPublicKey($issuerPublicKeyPem)))->createSubjectKeyIdentifier());
+        $certificate->setAuthorityKeyIdentifier(self::keyIdentifierOf($issuerPublicKeyPem));
+
+        if ($serialNumber !== null) {
+            $certificate->setSerialNumber($serialNumber);
+        }
 
         if ($ca) {
             $certificate->makeCA();

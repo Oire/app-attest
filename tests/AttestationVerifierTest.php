@@ -53,6 +53,7 @@ use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Constructed;
 use phpseclib4\File\ASN1\Maps\Certificate;
 use phpseclib4\File\X509;
+use phpseclib4\Math\BigInteger;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Clock\ClockInterface;
@@ -289,6 +290,35 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
     }
 
+    public function testExpiredIntermediateFailsTheChain(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExpiredIntermediate()
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+    }
+
+    public function testIntermediateNotYetValidFailsTheChain(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withIntermediateNotYetValid()
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+    }
+
+    public function testCredentialNamingTheSerialNumberOfItsIssuerIsAccepted(): void
+    {
+        $serialNumber = new BigInteger('0102030405060708', 16);
+        $attestation = AttestationBuilder::create()
+            ->withIntermediateSerialNumber($serialNumber)
+            ->withCredentialAuthorityCertSerialNumber($serialNumber)
+            ->build();
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
+    }
+
     public function testCaIssuersUrlIsNeverFetched(): void
     {
         $attestation = AttestationBuilder::create()
@@ -416,6 +446,100 @@ final class AttestationVerifierTest extends TestCase
     }
 
     /**
+     * phpseclib's isIssuerOf() reads these X509 properties, which the switches set for the whole process.
+     *
+     * @return iterable<string, array{string, Closure(): void, Closure(AttestationBuilder): AttestationBuilder}>
+     */
+    public static function provideIssuerFailuresUnderProcessWideSwitches(): iterable
+    {
+        $switches = [
+            'ignoreKeyUsage' => ['checkKeyUsage', X509::ignoreKeyUsage(...)],
+            'looseDNComparison' => ['strictDNComparison', X509::looseDNComparison(...)],
+            'ignoreBasicConstraints' => ['checkBasicConstraints', X509::ignoreBasicConstraints(...)],
+        ];
+        $variants = [
+            'intermediate without keyCertSign' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKeyUsage(['digitalSignature', 'cRLSign']),
+            'intermediate naming the root in capitals' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateIssuerName('OIRE TEST APP ATTESTATION ROOT CA'),
+            'credential naming the intermediate with doubled spaces' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialIssuerName('Oire  Test  App  Attestation  CA'),
+            'credential naming another issuer' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialIssuerName('Oire Test Other CA'),
+            'intermediate that is not a CA' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateNotCa(),
+        ];
+
+        foreach ($switches as $switch => [$property, $turnOn]) {
+            foreach ($variants as $name => $variant) {
+                yield $switch . ', ' . $name => [$property, $turnOn, $variant];
+            }
+        }
+    }
+
+    /**
+     * @param Closure(): void                                 $turnOn
+     * @param Closure(AttestationBuilder): AttestationBuilder $variant
+     */
+    #[DataProvider('provideIssuerFailuresUnderProcessWideSwitches')]
+    public function testProcessWideSwitchNeverLoosensTheIssuerChecks(string $property, Closure $turnOn, Closure $variant): void
+    {
+        $attestation = $variant(AttestationBuilder::create())->build();
+        $setting = new ReflectionProperty(X509::class, $property);
+        $saved = (bool) $setting->getValue();
+        $turnOn();
+
+        try {
+            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+        } finally {
+            $setting->setValue(null, $saved);
+        }
+    }
+
+    public function testValidChainIsAcceptedWhateverTheProcessWideSwitches(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
+        $settings = [];
+        $saved = [];
+
+        foreach (['checkKeyUsage', 'strictDNComparison', 'checkBasicConstraints'] as $property) {
+            $settings[$property] = new ReflectionProperty(X509::class, $property);
+            $saved[$property] = (bool) $settings[$property]->getValue();
+            $settings[$property]->setValue(null, !$saved[$property]);
+        }
+
+        try {
+            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
+            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
+        } finally {
+            foreach ($settings as $property => $setting) {
+                $setting->setValue(null, $saved[$property]);
+            }
+        }
+    }
+
+    public function testIssuerExtensionsAndNamesAreMatchedWhateverNamesTheProcessGivesTheirOids(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
+        $oids = new ReflectionProperty(ASN1::class, 'oids');
+        $reverseOids = new ReflectionProperty(ASN1::class, 'reverseOIDs');
+        $savedOids = (array) $oids->getValue();
+        $savedReverseOids = (array) $reverseOids->getValue();
+
+        try {
+            ASN1::loadOIDs([
+                'oireKeyUsage' => '2.5.29.15',
+                'oireSubjectKeyIdentifier' => '2.5.29.14',
+                'oireAuthorityKeyIdentifier' => '2.5.29.35',
+                'oireBasicConstraints' => '2.5.29.19',
+                'oireCommonName' => '2.5.4.3',
+            ]);
+            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
+            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
+        } finally {
+            $oids->setValue(null, $savedOids);
+            $reverseOids->setValue(null, $savedReverseOids);
+        }
+    }
+
+    /**
      * @return iterable<string, array{Closure(AttestationBuilder): AttestationBuilder}>
      */
     public static function provideBuiltChainsThatFail(): iterable
@@ -425,6 +549,11 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate naming another issuer' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateIssuerName('Oire Test Other Root CA')];
         yield 'credential naming another issuer' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialIssuerName('Oire Test Other CA')];
         yield 'CA intermediate without keyCertSign' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKeyUsage(['digitalSignature', 'cRLSign'])];
+        yield 'credential naming another key as its authority' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialNamingAnotherKey()];
+        yield 'credential naming another serial number of its issuer' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialAuthorityCertSerialNumber(new BigInteger(1))];
+        yield 'intermediate with its key usage twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateExtensionTwice(AttestationBuilder::KEY_USAGE_OID)];
+        yield 'intermediate with its subject key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateExtensionTwice(AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID)];
+        yield 'credential with its authority key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialAuthorityKeyIdentifierTwice()];
         yield 'credential signed with ECDSA over SHA-1' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialSignatureHash('sha1')];
         yield 'intermediate with an RSA key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(RsaKey::generate())];
         yield 'intermediate with an Ed25519 key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(EC::createKey('Ed25519'))];

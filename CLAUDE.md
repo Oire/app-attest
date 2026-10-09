@@ -93,9 +93,10 @@ tests/
 - PHPUnit fails on warnings, notices, deprecations and risky tests: malformed input must raise a typed
   failure, never a PHP warning.
 - Builders sign with phpseclib 4 (`PrivateKey::sign(X509)`) and write DER with `toString(['binary' => true])`:
-  the default output, PEM, is a process-wide setting. Issuers need a key usage with `keyCertSign`, and an
-  `authorityKeyIdentifier`, when present, must equal the issuer's `subjectKeyIdentifier`. phpseclib writes
-  an RSA subject key as RSASSA-PSS unless the key has PKCS #1 padding, and keeps one extension per OID, so
+  the default output, PEM, is a process-wide setting. Issuers need a key usage with `keyCertSign`, an
+  `authorityKeyIdentifier`, when present, must equal the issuer's `subjectKeyIdentifier`, and a certificate's
+  issuer Name must be the bytes of its issuer's subject Name. phpseclib writes an RSA subject key as
+  RSASSA-PSS unless the key has PKCS #1 padding, and keeps one extension per OID, so
   `tests/Support/SignedCertificate` takes certificates apart, edits the `tbsCertificate` and signs it again.
 - phpseclib's `X509` and `ASN1` settings are static and PHPUnit runs every test in one process: a test that
   changes one (an extension map, the CA store, the target date, a callback, an OID name) restores it in
@@ -121,16 +122,17 @@ tests/
   the certificate must be exactly the DER of its three parts, the signature BIT STRING must declare no
   unused bits, the outer `signatureAlgorithm` must equal the signed one byte for byte and be
   ecdsa-with-SHA256/384/512 without parameters, and the issuer's key must be EC (OpenSSL reports Edwards
-  keys as another type). Only then does it call `X509::load($der, ASN1::FORMAT_DER)` for `isIssuerOf()`,
-  then checks the validity periods (`validateDate()` is private in 4) and the intermediate's `cA` flag.
-  `disableURLFetch()` and `loadCA()` no longer exist; do not bring the CA store back.
+  keys as another type). Only then does it check the validity periods (`validateDate()` is private in 4),
+  each issuer and the intermediate's `cA` flag. `disableURLFetch()` and `loadCA()` no longer exist; do not
+  bring the CA store back.
 - phpseclib 4 decodes lazily: a malformed field throws only when it is read, reading a missing key of a
   `Constructed` creates it and drops the cached encoding, and `X509::load()` runs the SubjectPublicKeyInfo
   through `PublicKeyLoader` (every key format, then X.509 auto-detection) and replaces it with a key
   object. Hence no signature is checked through `X509::getSignableSection()`, which re-encodes the
-  certificate once its cache is gone, and nothing untrusted reaches `X509::load()` before its signature
-  verifies. The nonce, the SubjectPublicKeyInfo and `basicConstraints` are read from the rule-less map and
-  matched by dotted OID, never by phpseclib's names, which `ASN1::loadOIDs()` can change. phpseclib still
+  certificate once its cache is gone, and no certificate of the chain reaches `X509::load()`; only
+  `TrustAnchor::fromPem()` loads its root with it. The nonce, the SubjectPublicKeyInfo, the names and the
+  key usage, key identifier and `basicConstraints` extensions are read from the rule-less map and matched
+  by dotted OID, never by phpseclib's names, which `ASN1::loadOIDs()` can change. phpseclib still
   warns on some malformed DER, such as an empty OID (hence `ErrorGuard`), and throws
   `phpseclib4\Exception\*` exceptions.
 - phpseclib keeps extension maps process-wide, `registerExtension()` refuses an OID registered before, even
@@ -138,10 +140,15 @@ tests/
   library registers no map for the nonce extension; `Internal\NonceExtension` decodes it, and any map
   registered for its OID, or for a name `ASN1::loadOIDs()` gave it, is a `LogicException`. A credential
   certificate with the nonce extension twice fails the nonce.
-- `X509::isIssuerOf()` on a certificate from `X509::load()` (not `addCA()`) requires the issuer to carry a
-  key usage extension with `keyCertSign`, so `TrustAnchor::fromPem()` refuses a root without it, or without
-  an EC key: no chain could lead to such a root. phpseclib's own `basicConstraints` check there compares an
-  array with a string and never runs, hence `CertificateChain`'s `cA` check.
+- `X509::isIssuerOf()` reads the process-wide `X509::ignoreKeyUsage()`, `X509::looseDNComparison()` and
+  `X509::ignoreBasicConstraints()` switches (its `basicConstraints` check compares an array with a string and
+  never runs), so `CertificateChain` does not call it. It requires the child's issuer Name to equal the
+  issuer's subject Name byte for byte (the encoding RFC 5280 requires a CA to reuse; Apple's chain does, and
+  no normalization can be loosened), the issuer's key usage, exactly one, to include `keyCertSign`, and, as
+  `isIssuerOf()` did, an `authorityKeyIdentifier` to name the issuer's `subjectKeyIdentifier` when the issuer
+  has one and its serial number when it holds one; a key usage or key identifier extension twice fails.
+  `TrustAnchor::fromPem()` refuses a root without `keyCertSign`, or without an EC key: no chain could lead to
+  such a root.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.

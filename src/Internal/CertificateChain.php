@@ -11,14 +11,17 @@ use Oire\AppAttest\TrustAnchor;
 use OpenSSLAsymmetricKey;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Maps\AuthorityKeyIdentifier;
 use phpseclib4\File\ASN1\Maps\BasicConstraints;
 use phpseclib4\File\ASN1\Maps\Certificate;
+use phpseclib4\File\ASN1\Maps\KeyUsage;
+use phpseclib4\File\ASN1\Maps\SubjectKeyIdentifier;
 use phpseclib4\File\ASN1\Types\BitString;
 use phpseclib4\File\ASN1\Types\Boolean;
 use phpseclib4\File\ASN1\Types\Choice;
+use phpseclib4\File\ASN1\Types\Integer;
 use phpseclib4\File\ASN1\Types\OctetString;
 use phpseclib4\File\ASN1\Types\OID;
-use phpseclib4\File\X509;
 use Throwable;
 
 /**
@@ -45,17 +48,17 @@ use Throwable;
  *
  * phpseclib's validateSignature() trusts a process-wide CA store, checks dates against a process-wide target
  * date, may resolve caIssuers hosts and calls a process-wide CRL callback, and does not check that an issuer
- * is a CA. So each link is checked here instead, signatures first: the issuer's ECDSA signature over the
- * original tbsCertificate bytes, then phpseclib's issuer matching (names, key identifiers, key usage), the
- * validity period and the intermediate's basicConstraints. Verification makes no network call and leaves
- * phpseclib's CA store alone.
+ * is a CA; its isIssuerOf() obeys the process-wide ignoreKeyUsage() and looseDNComparison() switches. So each
+ * link is checked here instead, on a rule-less ASN1::map() of each certificate that no X509 setting affects,
+ * signatures first: the issuer's ECDSA signature over the original tbsCertificate bytes, then the issuer
+ * Name, key usage and key identifiers, the validity period and the intermediate's basicConstraints.
+ * Verification makes no network call, leaves phpseclib's CA store alone and never loads a certificate with
+ * X509::load(), which would hand the SubjectPublicKeyInfo to phpseclib's key parsers.
  *
  * Every certificate must be exactly one DER SEQUENCE, and an x5c entry at most MAX_LENGTH bytes, before
- * phpseclib reads it: phpseclib ignores bytes after the first element. The signatures are checked on a
- * rule-less ASN1::map() of each certificate, and only then is it loaded with X509::load(), which hands the
- * SubjectPublicKeyInfo to phpseclib's key parsers. A certificate must also be exactly the DER encoding of its
- * three parts and its signature strict DER, so its bytes cannot be altered and still pass, ECDSA's own choice
- * of s or n - s aside.
+ * phpseclib reads it: phpseclib ignores bytes after the first element. A certificate must also be exactly the
+ * DER encoding of its three parts and its signature strict DER, so its bytes cannot be altered and still
+ * pass, ECDSA's own choice of s or n - s aside.
  *
  * @internal
  */
@@ -67,6 +70,9 @@ final readonly class CertificateChain
     private const string BIT_STRING_TAG = "\x03";
     private const string NO_UNUSED_BITS = "\x00";
     private const string BASIC_CONSTRAINTS_OID = '2.5.29.19';
+    private const string KEY_USAGE_OID = '2.5.29.15';
+    private const string SUBJECT_KEY_IDENTIFIER_OID = '2.5.29.14';
+    private const string AUTHORITY_KEY_IDENTIFIER_OID = '2.5.29.35';
 
     /**
      * Hashes by the DER AlgorithmIdentifier of ecdsa-with-SHA256, -SHA384 and -SHA512, with the parameters
@@ -124,15 +130,13 @@ final readonly class CertificateChain
                     return null;
                 }
 
-                $intermediateCertificate = X509::load($intermediateDer, ASN1::FORMAT_DER);
-
                 if (
                     !self::isValidAt($root, $time)
                     || !self::isValidAt($intermediate, $time)
                     || !self::isValidAt($credential, $time)
-                    || !X509::load($rootDer, ASN1::FORMAT_DER)->isIssuerOf($intermediateCertificate)
+                    || !self::isIssuerOf($root, $intermediate)
                     || !self::isCa($intermediate)
-                    || !$intermediateCertificate->isIssuerOf(X509::load($credentialDer, ASN1::FORMAT_DER))
+                    || !self::isIssuerOf($intermediate, $credential)
                 ) {
                     return null;
                 }
@@ -149,15 +153,15 @@ final readonly class CertificateChain
 
     /**
      * Whether the certificate can anchor a chain: it holds an EC key other than an Edwards one, and its key
-     * usage includes keyCertSign, which phpseclib's isIssuerOf() requires of an issuer.
+     * usage includes keyCertSign, which the chain requires of every issuer.
      */
     public static function canAnchor(string $rootDer): bool
     {
         try {
             return ErrorGuard::call(static function() use ($rootDer): bool {
-                $keyUsage = self::at(X509::load($rootDer, ASN1::FORMAT_DER)->getExtension('id-ce-keyUsage'), BitString::class, 'extnValue');
+                $root = self::mapped($rootDer);
 
-                return self::ecKeyOf(self::mapped($rootDer)) !== null && $keyUsage?->contains('keyCertSign') === true;
+                return self::ecKeyOf($root) !== null && self::canSignCertificates($root);
             });
         } catch (Throwable) {
             return false;
@@ -239,12 +243,85 @@ final readonly class CertificateChain
         return $notBefore !== null && $notAfter !== null && $time >= $notBefore && $time <= $notAfter;
     }
 
+    /**
+     * Whether the issuer issued the certificate, its signature aside. The certificate's issuer Name must be
+     * byte for byte the issuer's subject Name, as RFC 5280 requires a CA to encode it, rather than equal after
+     * a normalization: no setting can loosen the match, and the bytes are those the signatures cover. The
+     * issuer's key usage must include keyCertSign. As in phpseclib's isIssuerOf(), an authority key identifier
+     * must name the issuer's subject key identifier when the issuer has one, and the issuer's serial number
+     * when it holds one. Each of these extensions may appear only once, as RFC 5280 requires.
+     */
+    private static function isIssuerOf(?Constructed $issuer, ?Constructed $certificate): bool
+    {
+        $subject = self::at($issuer, Choice::class, 'tbsCertificate', 'subject')?->getEncoded();
+        $issuerName = self::at($certificate, Choice::class, 'tbsCertificate', 'issuer')?->getEncoded();
+
+        return $subject !== null
+            && $subject !== ''
+            && $subject === $issuerName
+            && self::canSignCertificates($issuer)
+            && self::keyIdentifiersMatch($issuer, $certificate);
+    }
+
+    private static function canSignCertificates(?Constructed $certificate): bool
+    {
+        $keyUsage = self::extensionValues($certificate, self::KEY_USAGE_OID);
+
+        return count($keyUsage) === 1 && self::at(self::decoded($keyUsage[0] ?? null, KeyUsage::MAP), BitString::class)?->contains('keyCertSign') === true;
+    }
+
+    private static function keyIdentifiersMatch(?Constructed $issuer, ?Constructed $certificate): bool
+    {
+        $authorityKeyIdentifiers = self::extensionValues($certificate, self::AUTHORITY_KEY_IDENTIFIER_OID);
+        $subjectKeyIdentifiers = self::extensionValues($issuer, self::SUBJECT_KEY_IDENTIFIER_OID);
+
+        if (count($authorityKeyIdentifiers) > 1 || count($subjectKeyIdentifiers) > 1) {
+            return false;
+        }
+
+        if ($authorityKeyIdentifiers === []) {
+            return true;
+        }
+
+        $authority = self::at(self::decoded($authorityKeyIdentifiers[0] ?? null, AuthorityKeyIdentifier::MAP), Constructed::class);
+
+        if ($authority === null) {
+            return false;
+        }
+
+        if ($authority->offsetExists('authorityCertSerialNumber')) {
+            $serialNumber = self::at($issuer, Integer::class, 'tbsCertificate', 'serialNumber');
+
+            if ($serialNumber === null || self::at($authority, Integer::class, 'authorityCertSerialNumber')?->equals($serialNumber) !== true) {
+                return false;
+            }
+        }
+
+        if ($subjectKeyIdentifiers === []) {
+            return true;
+        }
+
+        $keyIdentifier = self::at($authority, OctetString::class, 'keyIdentifier');
+        $subjectKeyIdentifier = self::at(self::decoded($subjectKeyIdentifiers[0] ?? null, SubjectKeyIdentifier::MAP), OctetString::class);
+
+        return $keyIdentifier !== null && $subjectKeyIdentifier !== null && hash_equals($subjectKeyIdentifier->value, $keyIdentifier->value);
+    }
+
+    /**
+     * An extension's value mapped without phpseclib's X509 rules.
+     *
+     * @param array<string, mixed> $map
+     */
+    private static function decoded(?string $der, array $map): mixed
+    {
+        return $der === null ? null : ASN1::map(ASN1::decodeBER($der), $map);
+    }
+
     private static function isCa(?Constructed $certificate): bool
     {
         $basicConstraints = self::extensionValues($certificate, self::BASIC_CONSTRAINTS_OID)[0] ?? null;
 
-        return $basicConstraints !== null
-            && self::at(ASN1::map(ASN1::decodeBER($basicConstraints), BasicConstraints::MAP), Boolean::class, 'cA')?->value === true;
+        return self::at(self::decoded($basicConstraints, BasicConstraints::MAP), Boolean::class, 'cA')?->value === true;
     }
 
     /**

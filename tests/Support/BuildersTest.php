@@ -15,11 +15,14 @@ use Oire\AppAttest\Value\Environment;
 use Oire\AppAttest\Value\TeamId;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Maps\Certificate;
 use phpseclib4\File\ASN1\Types\BaseString;
 use phpseclib4\File\ASN1\Types\BitString;
 use phpseclib4\File\ASN1\Types\Boolean;
 use phpseclib4\File\ASN1\Types\Choice;
+use phpseclib4\File\ASN1\Types\OctetString;
 use phpseclib4\File\X509;
+use phpseclib4\Math\BigInteger;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -168,6 +171,118 @@ final class BuildersTest extends TestCase
         self::assertFalse(self::hasKeyCertSign($attestation->intermediateDer));
         self::assertFalse(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
         self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+    }
+
+    public function testIntermediateWithoutKeyCertSignPassesPhpseclibWhenKeyUsageIsIgnored(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withIntermediateKeyUsage(['digitalSignature', 'cRLSign'])
+            ->build();
+        $enabled = X509::isCheckKeyUsageEnabled();
+        X509::ignoreKeyUsage();
+
+        try {
+            self::assertTrue(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
+        } finally {
+            if ($enabled) {
+                X509::checkKeyUsage();
+            }
+        }
+    }
+
+    public function testIssuerNamesCanDifferOnlyInCaseOrSpacing(): void
+    {
+        $intermediateInCapitals = AttestationBuilder::create()
+            ->withIntermediateIssuerName('OIRE TEST APP ATTESTATION ROOT CA')
+            ->build();
+        $credentialWithDoubledSpaces = AttestationBuilder::create()
+            ->withCredentialIssuerName('Oire  Test  App  Attestation  CA')
+            ->build();
+        $rootDer = Pem::toDer($intermediateInCapitals->rootPem);
+        $strict = X509::isStrictDNComparisonEnabled();
+
+        self::assertFalse(self::isIssuerOf($rootDer, $intermediateInCapitals->intermediateDer));
+        self::assertFalse(self::isIssuerOf($credentialWithDoubledSpaces->intermediateDer, $credentialWithDoubledSpaces->credentialDer));
+        X509::looseDNComparison();
+
+        try {
+            self::assertTrue(self::isIssuerOf($rootDer, $intermediateInCapitals->intermediateDer));
+            self::assertTrue(self::isIssuerOf($credentialWithDoubledSpaces->intermediateDer, $credentialWithDoubledSpaces->credentialDer));
+        } finally {
+            if ($strict) {
+                X509::strictDNComparison();
+            }
+        }
+
+        self::assertTrue(self::signedBy($intermediateInCapitals->intermediateDer, $rootDer));
+        self::assertTrue(self::signedBy($credentialWithDoubledSpaces->credentialDer, $credentialWithDoubledSpaces->intermediateDer));
+    }
+
+    public function testIntermediateCanBeExpiredOrNotYetValid(): void
+    {
+        $expired = AttestationBuilder::create()
+            ->withExpiredIntermediate()
+            ->build();
+        $notYetValid = AttestationBuilder::create()
+            ->withIntermediateNotYetValid()
+            ->build();
+        $now = $expired->clock()->now();
+
+        foreach ([$expired, $notYetValid] as $attestation) {
+            self::assertFalse(self::validAt($attestation->intermediateDer, $now));
+            self::assertTrue(self::validAt($attestation->rootPem, $now));
+            self::assertTrue(self::validAt($attestation->credentialDer, $now));
+            self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+            self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
+        }
+
+        self::assertTrue(self::validAt($expired->intermediateDer, $now->modify('-2 days')));
+        self::assertTrue(self::validAt($notYetValid->intermediateDer, $now->modify('+2 days')));
+    }
+
+    public function testCredentialAuthorityKeyIdentifierCanNameAnotherKeyOrSerialNumber(): void
+    {
+        $serialNumber = new BigInteger('0102030405060708', 16);
+        $anotherKey = AttestationBuilder::create()
+            ->withCredentialNamingAnotherKey()
+            ->build();
+        $anotherSerialNumber = AttestationBuilder::create()
+            ->withCredentialAuthorityCertSerialNumber(new BigInteger(1))
+            ->build();
+        $issuerSerialNumber = AttestationBuilder::create()
+            ->withIntermediateSerialNumber($serialNumber)
+            ->withCredentialAuthorityCertSerialNumber($serialNumber)
+            ->build();
+
+        self::assertFalse(self::isIssuerOf($anotherKey->intermediateDer, $anotherKey->credentialDer));
+        self::assertTrue(self::signedBy($anotherKey->credentialDer, $anotherKey->intermediateDer));
+        self::assertFalse(self::isIssuerOf($anotherSerialNumber->intermediateDer, $anotherSerialNumber->credentialDer));
+        self::assertTrue(self::signedBy($anotherSerialNumber->credentialDer, $anotherSerialNumber->intermediateDer));
+        self::assertTrue(self::isIssuerOf($issuerSerialNumber->intermediateDer, $issuerSerialNumber->credentialDer));
+    }
+
+    public function testKeyUsageOrKeyIdentifiersCanComeTwice(): void
+    {
+        $keyUsageTwice = AttestationBuilder::create()
+            ->withIntermediateExtensionTwice(AttestationBuilder::KEY_USAGE_OID)
+            ->build();
+        $subjectKeyIdentifierTwice = AttestationBuilder::create()
+            ->withIntermediateExtensionTwice(AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID)
+            ->build();
+        $authorityKeyIdentifierTwice = AttestationBuilder::create()
+            ->withCredentialAuthorityKeyIdentifierTwice()
+            ->build();
+
+        foreach ([$keyUsageTwice, $subjectKeyIdentifierTwice, $authorityKeyIdentifierTwice] as $attestation) {
+            self::assertTrue(self::signedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
+            self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+            self::assertTrue(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
+        }
+
+        self::assertSame(2, self::extensionCount($keyUsageTwice->intermediateDer, AttestationBuilder::KEY_USAGE_OID));
+        self::assertSame(2, self::extensionCount($subjectKeyIdentifierTwice->intermediateDer, AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID));
+        self::assertSame(2, self::extensionCount($authorityKeyIdentifierTwice->credentialDer, AttestationBuilder::AUTHORITY_KEY_IDENTIFIER_OID));
+        self::assertSame(1, self::extensionCount($authorityKeyIdentifierTwice->intermediateDer, AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID));
     }
 
     public function testRootCanLackKeyUsage(): void
@@ -519,6 +634,34 @@ final class BuildersTest extends TestCase
         self::assertNotFalse($key);
 
         return openssl_verify($tbsCertificate, mb_substr($bits, 1, null, '8bit'), $key, $hash) === 1;
+    }
+
+    /**
+     * How many extensions with the OID the certificate holds, and all of them with the same value.
+     */
+    private static function extensionCount(string $der, string $oid): int
+    {
+        $certificate = ASN1::map(ASN1::decodeBER($der), Certificate::MAP);
+        self::assertInstanceOf(Constructed::class, $certificate);
+        $tbsCertificate = $certificate['tbsCertificate'];
+        self::assertInstanceOf(Constructed::class, $tbsCertificate);
+        $extensions = $tbsCertificate['extensions'];
+        self::assertInstanceOf(Constructed::class, $extensions);
+        $values = [];
+
+        foreach ($extensions as $extension) {
+            self::assertInstanceOf(Constructed::class, $extension);
+
+            if (ASN1::getOIDFromName((string) $extension['extnId']) === $oid) {
+                $value = $extension['extnValue'];
+                self::assertInstanceOf(OctetString::class, $value);
+                $values[] = $value->value;
+            }
+        }
+
+        self::assertLessThanOrEqual(1, count(array_unique($values)));
+
+        return count($values);
     }
 
     private static function isIssuerOf(string $issuer, string $certificate): bool
