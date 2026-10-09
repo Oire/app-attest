@@ -268,6 +268,71 @@ final class AssertionVerifierTest extends TestCase
         self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt(AssertionBuilder::create(), cbor: $cbor));
     }
 
+    #[DataProvider('provideGenuineVectors')]
+    public function testGenuineVectorWithATrailingByteIsMalformed(AssertionVector $vector): void
+    {
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyVector($vector, cbor: $vector->bytes . "\x00"));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideTrailingData(): iterable
+    {
+        yield 'a break byte' => ["\xff"];
+        yield 'an empty map' => [(string) MapObject::create()];
+        yield 'a text string' => [(string) TextStringObject::create('signature')];
+    }
+
+    #[DataProvider('provideTrailingData')]
+    public function testDocumentFollowedByMoreDataIsMalformed(string $trailing): void
+    {
+        $builder = AssertionBuilder::create();
+
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder, cbor: $builder->build(self::CLIENT_DATA) . $trailing));
+    }
+
+    public function testDocumentFollowedByItselfIsMalformed(): void
+    {
+        $builder = AssertionBuilder::create();
+        $cbor = $builder->build(self::CLIENT_DATA);
+
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder, cbor: $cbor . $cbor));
+    }
+
+    /**
+     * @return iterable<string, array{callable(AssertionParts): string}>
+     */
+    public static function provideRetypedMembers(): iterable
+    {
+        yield 'signature a text string' => [static fn(AssertionParts $a): string => self::assertionObject(
+            TextStringObject::create($a->signature),
+            ByteStringObject::create($a->authenticatorData),
+        )];
+        yield 'authenticatorData a text string' => [static fn(AssertionParts $a): string => self::assertionObject(
+            ByteStringObject::create($a->signature),
+            TextStringObject::create($a->authenticatorData),
+        )];
+        yield 'signature key a byte string' => [static fn(AssertionParts $a): string => (string) MapObject::create()
+            ->add(ByteStringObject::create('signature'), ByteStringObject::create($a->signature))
+            ->add(TextStringObject::create('authenticatorData'), ByteStringObject::create($a->authenticatorData))];
+        yield 'authenticatorData key a byte string' => [static fn(AssertionParts $a): string => (string) MapObject::create()
+            ->add(TextStringObject::create('signature'), ByteStringObject::create($a->signature))
+            ->add(ByteStringObject::create('authenticatorData'), ByteStringObject::create($a->authenticatorData))];
+    }
+
+    /**
+     * @param callable(AssertionParts): string $document
+     */
+    #[DataProvider('provideRetypedMembers')]
+    public function testMemberOfAnotherStringTypeIsMalformed(callable $document): void
+    {
+        $builder = AssertionBuilder::create();
+        $parts = self::partsOf($builder->build(self::CLIENT_DATA));
+
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder, cbor: $document($parts)));
+    }
+
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
         $vector = Fixtures::assertion(self::MUTATED_VECTOR);

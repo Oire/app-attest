@@ -514,6 +514,71 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt(AttestationBuilder::create()->build(), cbor: $cbor));
     }
 
+    #[DataProvider('provideGenuineVectors')]
+    public function testGenuineVectorWithATrailingByteIsMalformed(AttestationVector $vector): void
+    {
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyVector($vector, cbor: $vector->bytes . "\x00"));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideTrailingData(): iterable
+    {
+        yield 'a break byte' => ["\xff"];
+        yield 'an empty map' => [(string) MapObject::create()];
+        yield 'a text string' => [(string) TextStringObject::create(AttestationBuilder::FORMAT)];
+    }
+
+    #[DataProvider('provideTrailingData')]
+    public function testDocumentFollowedByMoreDataIsMalformed(string $trailing): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $attestation->cbor . $trailing));
+    }
+
+    public function testDocumentFollowedByItselfIsMalformed(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $attestation->cbor . $attestation->cbor));
+    }
+
+    public function testDocumentWithEveryMemberOfItsExpectedTypeIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: self::attestationObjectRetyping($attestation, null))->keyId);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideRetypedMembers(): iterable
+    {
+        yield 'fmt a byte string' => ['fmt'];
+        yield 'credential certificate a text string' => ['credential'];
+        yield 'intermediate certificate a text string' => ['intermediate'];
+        yield 'receipt a text string' => ['receipt'];
+        yield 'authData a text string' => ['authData'];
+        yield 'fmt key a byte string' => ['key fmt'];
+        yield 'attStmt key a byte string' => ['key attStmt'];
+        yield 'x5c key a byte string' => ['key x5c'];
+        yield 'receipt key a byte string' => ['key receipt'];
+        yield 'authData key a byte string' => ['key authData'];
+    }
+
+    #[DataProvider('provideRetypedMembers')]
+    public function testMemberOfAnotherStringTypeIsMalformed(string $member): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: self::attestationObjectRetyping($attestation, $member)));
+    }
+
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
         $vector = Fixtures::attestation(self::MUTATED_VECTOR);
@@ -691,6 +756,26 @@ final class AttestationVerifierTest extends TestCase
         }
 
         return (string) $document;
+    }
+
+    /**
+     * The attestation with each string of the type Apple uses, except $retyped: a text string where a byte
+     * string belongs, or the other way round.
+     */
+    private static function attestationObjectRetyping(BuiltAttestation $attestation, ?string $retyped): string
+    {
+        $string = static fn(string $member, string $value, bool $text = false): CBORObject => $text !== ($member === $retyped)
+            ? TextStringObject::create($value)
+            : ByteStringObject::create($value);
+        $key = static fn(string $name): CBORObject => $string('key ' . $name, $name, true);
+        $attStmt = MapObject::create()
+            ->add($key('x5c'), ListObject::create([$string('credential', $attestation->credentialDer), $string('intermediate', $attestation->intermediateDer)]))
+            ->add($key('receipt'), $string('receipt', $attestation->receipt));
+
+        return (string) MapObject::create()
+            ->add($key('fmt'), $string('fmt', AttestationBuilder::FORMAT, true))
+            ->add($key('attStmt'), $attStmt)
+            ->add($key('authData'), $string('authData', $attestation->authData));
     }
 
     private static function assertChainRefusesDamage(string $der, Damaged $damaged, string $outcome): void

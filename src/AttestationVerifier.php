@@ -9,6 +9,7 @@ use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
 use Oire\AppAttest\Internal\AuthenticatorData;
 use Oire\AppAttest\Internal\Cbor;
+use Oire\AppAttest\Internal\CborText;
 use Oire\AppAttest\Internal\CertificateChain;
 use Oire\AppAttest\Internal\EcPoint;
 use Oire\AppAttest\Value\AppIdentity;
@@ -73,7 +74,7 @@ final readonly class AttestationVerifier
         $authDataBytes = $document['authData'] ?? null;
 
         if (
-            ($document['fmt'] ?? null) !== self::FORMAT
+            !self::isAppAttestFormat($document['fmt'] ?? null)
             || $certificates === null
             || !is_string($receipt)
             || !is_string($authDataBytes)
@@ -117,6 +118,14 @@ final readonly class AttestationVerifier
         }
 
         return new AttestedKey($point->keyId(), $point->publicKeyPem(), $environment, $receipt);
+    }
+
+    /**
+     * @psalm-pure
+     */
+    private static function isAppAttestFormat(mixed $fmt): bool
+    {
+        return $fmt instanceof CborText && $fmt->value === self::FORMAT;
     }
 
     /**

@@ -16,6 +16,7 @@ use CBOR\MapItem;
 use CBOR\MapObject;
 use CBOR\StringStream;
 use CBOR\TextStringObject;
+use InvalidArgumentException;
 use Throwable;
 
 /**
@@ -38,42 +39,58 @@ use Throwable;
 /**
  * Decodes untrusted CBOR without letting a decoder error or a PHP warning escape.
  *
- * Only what App Attest documents hold survives decoding: byte and text strings become strings, lists become
- * lists, maps become arrays keyed by their string keys. Any other value, such as an integer, becomes null,
- * so it cannot pass for a string.
+ * Only what App Attest documents hold survives decoding: byte strings become strings, text strings become
+ * CborText, lists become lists, maps become arrays keyed by their text-string keys. Any other value, such as
+ * an integer, becomes null, and any other key is dropped, so neither can pass for what the document needs.
  *
  * @internal
  */
 final class Cbor
 {
     /**
-     * The map the bytes encode, or null if they do not encode a map.
+     * The map the bytes encode, or null if they do not encode exactly one map with nothing after it.
      *
-     * @return array<string, string|array<array-key, mixed>|null>|null
+     * @return array<string, string|CborText|array<array-key, mixed>|null>|null
      */
     public static function tryDecodeMap(string $bytes): ?array
     {
         try {
             return ErrorGuard::call(static function() use ($bytes): ?array {
-                $object = Decoder::create()->decode(StringStream::create($bytes));
+                $stream = StringStream::create($bytes);
+                $object = Decoder::create()->decode($stream);
 
-                return $object instanceof MapObject || $object instanceof IndefiniteLengthMapObject ? self::convertMap($object) : null;
+                if (self::hasMore($stream) || !($object instanceof MapObject || $object instanceof IndefiniteLengthMapObject)) {
+                    return null;
+                }
+
+                return self::convertMap($object);
             });
         } catch (Throwable) {
             return null;
         }
     }
 
+    private static function hasMore(StringStream $stream): bool
+    {
+        try {
+            $stream->read(1);
+        } catch (InvalidArgumentException) {
+            return false;
+        }
+
+        return true;
+    }
+
     /**
-     * @return string|array<array-key, mixed>|null
+     * @return string|CborText|array<array-key, mixed>|null
      */
-    private static function convert(CBORObject $object): array|string|null
+    private static function convert(CBORObject $object): array|CborText|string|null
     {
         return match (true) {
             $object instanceof ByteStringObject,
-            $object instanceof IndefiniteLengthByteStringObject,
+            $object instanceof IndefiniteLengthByteStringObject => $object->getValue(),
             $object instanceof TextStringObject,
-            $object instanceof IndefiniteLengthTextStringObject => $object->getValue(),
+            $object instanceof IndefiniteLengthTextStringObject => new CborText($object->getValue()),
             $object instanceof ListObject,
             $object instanceof IndefiniteLengthListObject => self::convertList($object),
             $object instanceof MapObject,
@@ -85,7 +102,7 @@ final class Cbor
     /**
      * @param iterable<CBORObject> $list
      *
-     * @return list<string|array<array-key, mixed>|null>
+     * @return list<string|CborText|array<array-key, mixed>|null>
      */
     private static function convertList(iterable $list): array
     {
@@ -101,7 +118,7 @@ final class Cbor
     /**
      * @param iterable<MapItem> $map
      *
-     * @return array<string, string|array<array-key, mixed>|null>
+     * @return array<string, string|CborText|array<array-key, mixed>|null>
      */
     private static function convertMap(iterable $map): array
     {
@@ -110,8 +127,8 @@ final class Cbor
         foreach ($map as $item) {
             $key = self::convert($item->getKey());
 
-            if (is_string($key)) {
-                $converted[$key] = self::convert($item->getValue());
+            if ($key instanceof CborText) {
+                $converted[$key->value] = self::convert($item->getValue());
             }
         }
 
