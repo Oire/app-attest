@@ -6,6 +6,7 @@ namespace Oire\AppAttest\Tests\Value;
 
 use Oire\AppAttest\Value\AttestedKey;
 use Oire\AppAttest\Value\Environment;
+use Oire\AppAttest\Value\ValidationCategory;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -38,6 +39,27 @@ final class AttestedKeyTest extends TestCase
         self::assertSame(Environment::Development, $key->environment);
         self::assertSame('receipt', $key->receipt);
         self::assertSame(0, $key->counter);
+        self::assertNull($key->validationCategory);
+        self::assertNull($key->validationCategory());
+        self::assertNull($key->bundleVersion);
+    }
+
+    public function testKeepsItsLaunchValues(): void
+    {
+        $key = new AttestedKey('id', self::PUBLIC_KEY_PEM, Environment::Production, 'receipt', 4, '2.1');
+
+        self::assertSame(4, $key->validationCategory);
+        self::assertSame(ValidationCategory::AppStore, $key->validationCategory());
+        self::assertSame('2.1', $key->bundleVersion);
+    }
+
+    public function testUnknownValidationCategoryIsKeptRawButNamesNoCase(): void
+    {
+        $key = new AttestedKey('id', self::PUBLIC_KEY_PEM, Environment::Production, 'receipt', 8);
+
+        self::assertSame(8, $key->validationCategory);
+        self::assertNull($key->validationCategory());
+        self::assertNull($key->bundleVersion);
     }
 
     public function testKeyIdBase64UrlRoundTripsWithoutPadding(): void

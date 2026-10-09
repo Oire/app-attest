@@ -18,13 +18,23 @@ The first release: verification of Apple App Attest attestations and assertions,
 * **`AssertionVerifier`** checks an assertion's ECDSA P-256 signature over the nonce, the SHA-256 of
   `authenticatorData` followed by the SHA-256 of `clientData`, its `rpIdHash` and a counter strictly
   greater than the previous one, and returns the new counter. `clientData` is never parsed.
+* **Launch category and bundle version**, opt-in: both verifiers read the `extensions` CBOR map Apple
+  appends to the authenticator data, after the credential public key in an attestation and after the 37
+  bytes of an assertion, for the validation category (`apple_validation_category_01` or
+  `validationCategory`, four little-endian bytes or an unsigned integer) and the bundle version
+  (`apple_bundle_version_01` or `bundleVersion`, a text string). `AttestedKey` reports them as
+  `$validationCategory`, `$bundleVersion` and `validationCategory()`. A `LaunchPolicy`, passed as the new
+  last argument of either `verify()`, enforces them with the reasons `ValidationCategory` and
+  `BundleVersion`; without one, nothing changes, and a missing or malformed extensions area is ignored.
+  `ValidationCategory` is an int-backed enum with Apple's launch-constraint numbering.
 * **Typed failures:** `AttestationException` and `AssertionException`, both extending the abstract
   `AppAttestException`, carry a `$reason` enum case naming the failed check. Caller errors, such as an
   invalid team id or public key, are `InvalidArgumentException`. A broken installation or another
   phpseclib map registered for the nonce extension is a `LogicException`.
 * **`TrustAnchor`** bundles Apple's App Attest root and checks its pinned SHA-256 fingerprint on every
   load; `TrustAnchor::fromPem()` takes a test root.
-* **Value objects:** `TeamId`, `BundleId`, `AppIdentity`, the `Environment` enum and `AttestedKey`.
+* **Value objects:** `TeamId`, `BundleId`, `AppIdentity`, the `Environment` and `ValidationCategory`
+  enums, `AttestedKey` and `LaunchPolicy`.
 * **`SystemClock`**, the PSR-20 clock used when none is passed; any PSR-20 clock can be injected.
 * No state and no I/O: no network, no key storage, no challenges, no logging. `AttestationVerifier`
   disables phpseclib's URL fetching and registers the App Attest nonce extension with phpseclib, both

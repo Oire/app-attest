@@ -35,8 +35,10 @@ final readonly class AttestedKey
     public int $counter;
 
     /**
-     * @param string $keyId   the key id as raw bytes: the SHA-256 of the public key's uncompressed EC point
-     * @param string $receipt Apple's App Attest receipt as raw bytes
+     * @param string  $keyId              the key id as raw bytes: the SHA-256 of the public key's uncompressed EC point
+     * @param string  $receipt            Apple's App Attest receipt as raw bytes
+     * @param ?int    $validationCategory the raw launch validation category in the authenticator data, null if absent
+     * @param ?string $bundleVersion      the bundle version in the authenticator data, null if absent
      *
      * @psalm-capabilities read-props
      */
@@ -45,8 +47,20 @@ final readonly class AttestedKey
         public string $publicKeyPem,
         public Environment $environment,
         public string $receipt,
+        public ?int $validationCategory = null,
+        public ?string $bundleVersion = null,
     ) {
         $this->counter = 0;
+    }
+
+    /**
+     * The validation category, or null if it is absent or a number Apple names no category for.
+     *
+     * @psalm-capabilities read-props
+     */
+    public function validationCategory(): ?ValidationCategory
+    {
+        return $this->validationCategory === null ? null : ValidationCategory::tryFrom($this->validationCategory);
     }
 
     /**

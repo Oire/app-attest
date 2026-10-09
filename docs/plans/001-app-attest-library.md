@@ -362,6 +362,8 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       integer or a tag where a byte string belongs is `Format` (plan execution, 2026-10-09)
 - [x] newer extensions on the credential certificate (`apple_validation_category_01`,
       `apple_bundle_version_01` and any unknown one) are ignored, never required
+      ⚠️ These are not certificate extensions but entries of the `extensions` CBOR map in `authData`;
+      ➕ Task 7 reads them and enforces them on request (plan execution, 2026-10-09)
 - [x] returns `AttestedKey` with the public key as PEM, the environment, the receipt bytes and counter 0
 - [x] tests: every genuine vector accepted with the expected key; each input-triggered failure (Task 3's
       list) and each builder-made failure raises its own reason; production accepted and refused through
@@ -461,51 +463,79 @@ request, so every existing call keeps its behavior.
   `src/Internal/AuthenticatorData.php` (and `Cbor` if needed), both reason enums
 - Modify: `tests/Support/AttestationBuilder.php`, `tests/Support/AssertionBuilder.php`, the verifier tests
 - Modify: `README.md`, `CHANGELOG.md`, `CLAUDE.md`
+- ➕ Create: `src/Internal/CborStream.php` (the decoder's input, telling how many bytes it read),
+  `src/Internal/Extensions.php` (reads the launch values from the extensions area),
+  `tests/Support/ExtensionsMap.php` (encodes extension maps for the builders), `tests/Value/LaunchPolicyTest.php`,
+  `tests/Value/ValidationCategoryTest.php`; Modify: `src/Internal/CborMap.php`, `tests/Support/BuildersTest.php`,
+  `tests/Exception/ExceptionsTest.php`, `tests/Value/AttestedKeyTest.php` (plan execution, 2026-10-09)
 
 #### Steps
-- [ ] `authData` parsing goes past the COSE key: decode the credential public key as one CBOR item, then
+- [x] `authData` parsing goes past the COSE key: decode the credential public key as one CBOR item, then
       at most one CBOR map of extensions, whatever the ED flag says (Apple's sample has it clear). Bytes
       that are neither stay ignored as before; an extensions area that is not one well-formed map yields
       no values rather than a failure, unless a policy needs them. The assertion `authenticatorData` is
       read the same way after its 37 bytes, accepting the keys `validationCategory` and `bundleVersion`
       as well as the `apple_…_01` spellings
-- [ ] values: the category is a `UInt32` given either as a 4-byte little-endian byte string (Apple's
+      ⚠️ `Cbor::tryItemLength()` decodes the COSE key through `Internal\CborStream` and returns the bytes
+      it took (any content, integer keys included); everything after it is the extensions area, read with
+      the strict `Cbor::tryDecodeMap()`, so it yields values only when it is exactly one map with distinct
+      text-string keys and nothing after it. A COSE key that does not decode yields no values. Both
+      verifiers accept both spellings; when both hold a usable value, the `apple_…_01` one wins. The
+      decoder now keeps unsigned integers that fit a PHP int, which cannot pass for any document member.
+      `AuthenticatorData`, `Extensions` and `LaunchPolicy` are `readonly` but not `@psalm-immutable`: the
+      decoder runs under `ErrorGuard` and the bundle version closure is the caller's, both impure
+      (plan execution, 2026-10-09)
+- [x] values: the category is a `UInt32` given either as a 4-byte little-endian byte string (Apple's
       sample) or as a CBOR unsigned integer; the bundle version is a text string. Anything else counts as
       absent
-- [ ] `ValidationCategory`, an int-backed enum with Apple's launch-constraint numbering (confirm it from
+- [x] `ValidationCategory`, an int-backed enum with Apple's launch-constraint numbering (confirm it from
       Apple's "Defining launch environment and library constraints": 1 platform, 2 TestFlight,
       3 development, 4 App Store, 5 enterprise or ad hoc, 6 Developer ID, 7 to 9 restricted, 10 none;
       name the restricted ones as Apple does)
-- [ ] `AttestedKey` gains trailing, defaulted `?int $validationCategory` (raw value, so an unknown number
+      ⚠️ Confirmed from Apple's documentation JSON (2026-10-09): the numbering is as listed, and Apple names
+      7 to 9 nowhere ("aren't appropriate for `validation-category` facts in constraints as they represent
+      categories of binaries that the system generates in certain restricted situations"); its Swift
+      `LightweightCodeRequirements.ValidationCategory.Value` has only `platform`, `testflight`,
+      `development`, `appStore`, `enterprise`, `developerID` and `none`. So the cases are `Platform` 1,
+      `TestFlight` 2, `Development` 3, `AppStore` 4, `Enterprise` 5, `DeveloperId` 6 and `None` 10, with no
+      case for 7 to 9: `AttestedKey::$validationCategory` still reports them, and no policy can allow them
+      (plan execution, 2026-10-09)
+- [x] `AttestedKey` gains trailing, defaulted `?int $validationCategory` (raw value, so an unknown number
       is still reported) and `?string $bundleVersion`, plus a `validationCategory(): ?ValidationCategory`
       helper or equivalent; existing constructor calls keep working
-- [ ] `LaunchPolicy` (final readonly, `@psalm-api`): a list of allowed `ValidationCategory` cases (empty
+- [x] `LaunchPolicy` (final readonly, `@psalm-api`): a list of allowed `ValidationCategory` cases (empty
       means "do not check the category") and an optional `Closure(string): bool` for the bundle version
       (null means "do not check it"); named constructors or a fluent builder for the common cases
-- [ ] both `verify()` methods take a trailing `?LaunchPolicy $launchPolicy = null`. With null, nothing
+      ⚠️ `LaunchPolicy::allowing(...)` and `withBundleVersion()`, plus `allowsValidationCategory(?int)` and
+      `acceptsBundleVersion(?string)`, which both verifiers call; the closure passes only when it returns
+      `true`, and a category list entry that is not a `ValidationCategory` is an
+      `InvalidArgumentException` (plan execution, 2026-10-09)
+- [x] both `verify()` methods take a trailing `?LaunchPolicy $launchPolicy = null`. With null, nothing
       changes. With a policy, a category that is absent, unknown or not allowed is the new reason
       `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
       `BundleVersion`; both run after every existing check. Add both cases to `AttestationFailureReason`
       and `AssertionFailureReason`
-- [ ] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
+- [x] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
       into `authData` and `authenticatorData`
-- [ ] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
+- [x] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
       allowing `1`, refused with `ValidationCategory` by an App Store-only policy and with `BundleVersion`
       by a closure wanting `"2.0"`; an iOS 14 vector reports nulls, verifies without a policy and fails with
       a policy; builder attestations and assertions cover both encodings, an unknown category, a malformed
       map and a missing value; every existing test still passes unchanged
-- [ ] README: what the two values are, Apple's wording, that only newer OS versions send them, the
+- [x] README: what the two values are, Apple's wording, that only newer OS versions send them, the
       opt-in policy with an example, and that no genuine assertion sample with them exists. CHANGELOG
       1.0.0 and CLAUDE.md updated. Task 4's sentence about "newer extensions on the credential certificate"
       gets a ⚠️ note pointing here
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ## Technical details
 
 ### Public API
 
 ⚠️ Updated after review to match the code: the classes are `final readonly`, and the sketch now lists the
-members added during implementation (plan execution, 2026-10-09).
+members added during implementation (plan execution, 2026-10-09). ➕ Task 7 adds the trailing
+`?LaunchPolicy $launchPolicy` argument, `ValidationCategory`, `LaunchPolicy`, the launch values on
+`AttestedKey` and the `ValidationCategory` and `BundleVersion` reasons.
 
 ```php
 namespace Oire\AppAttest;
@@ -516,13 +546,14 @@ final readonly class AttestationVerifier {
     public function __construct(?TrustAnchor $root = null, ?ClockInterface $clock = null);
     /** @param list<Environment> $allowed  @throws AttestationException */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId,
-                           AppIdentity $app, array $allowed): AttestedKey;
+                           AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey;
 }
 
 final readonly class AssertionVerifier {
     /** @throws InvalidArgumentException  @throws AssertionException */
     public function verify(string $assertionCbor, string $clientData, string $publicKeyPem,
-                           int $previousCounter, AppIdentity $app): int; // the new counter
+                           int $previousCounter, AppIdentity $app,
+                           ?LaunchPolicy $launchPolicy = null): int; // the new counter
 }
 
 final readonly class TrustAnchor {
@@ -552,9 +583,25 @@ enum Environment: string {
     public static function tryFromAaguid(string $aaguid): ?self;
 }
 final readonly class AttestedKey {
-    public function __construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt);
+    public function __construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt,
+                                ?int $validationCategory = null, ?string $bundleVersion = null);
     string $keyId; string $publicKeyPem; Environment $environment; string $receipt; int $counter; // 0
+    ?int $validationCategory; ?string $bundleVersion; // null if absent
+    public function validationCategory(): ?ValidationCategory; // null if absent or unnamed
     public function keyIdBase64Url(): string;
+}
+enum ValidationCategory: int {
+    case Platform = 1; case TestFlight = 2; case Development = 3; case AppStore = 4;
+    case Enterprise = 5; case DeveloperId = 6; case None = 10; // 7-9: unnamed by Apple, no case
+}
+final readonly class LaunchPolicy {
+    /** @param list<ValidationCategory> $validationCategories  @param ?Closure(string): bool $acceptsBundleVersion */
+    public function __construct(array $validationCategories = [], ?Closure $acceptsBundleVersion = null);
+    array $validationCategories; ?Closure $acceptsBundleVersion; // empty / null: not checked
+    public static function allowing(ValidationCategory ...$categories): self;
+    public function withBundleVersion(Closure $accepts): self;
+    public function allowsValidationCategory(?int $category): bool;
+    public function acceptsBundleVersion(?string $bundleVersion): bool;
 }
 ```
 
@@ -565,9 +612,9 @@ use RuntimeException;
 
 abstract class AppAttestException extends RuntimeException {}
 final class AttestationException extends AppAttestException { public readonly AttestationFailureReason $reason; }
-enum AttestationFailureReason { case Format; case CertificateChain; case Nonce; case KeyId; case RpIdHash; case Counter; case Environment; }
+enum AttestationFailureReason { case Format; case CertificateChain; case Nonce; case KeyId; case RpIdHash; case Counter; case Environment; case ValidationCategory; case BundleVersion; }
 final class AssertionException extends AppAttestException { public readonly AssertionFailureReason $reason; }
-enum AssertionFailureReason { case Format; case Signature; case RpIdHash; case Counter; }
+enum AssertionFailureReason { case Format; case Signature; case RpIdHash; case Counter; case ValidationCategory; case BundleVersion; }
 ```
 
 `$keyId` and `$clientDataHash` are raw bytes; callers decode their transport encoding — base64url, as

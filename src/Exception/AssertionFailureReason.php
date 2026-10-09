@@ -32,4 +32,6 @@ enum AssertionFailureReason
     case Signature;
     case RpIdHash;
     case Counter;
+    case ValidationCategory;
+    case BundleVersion;
 }

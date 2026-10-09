@@ -23,12 +23,11 @@ namespace Oire\AppAttest\Internal;
 
 /**
  * Authenticator data: rpIdHash (32 bytes), flags (1), signCount (4, big-endian), then, in an attestation
- * only, aaguid (16), credentialId length (2, big-endian), credentialId and the credential public key.
- * Bytes after the credentialId are not interpreted: the public key, and any extensions Apple appends.
+ * only, aaguid (16), credentialId length (2, big-endian), credentialId and the credential public key as one
+ * CBOR item. What follows, after the public key in an attestation and after the counter in an assertion, is
+ * read as the extensions map whatever the flags say; bytes that are not one well-formed map are ignored.
  *
  * @internal
- *
- * @psalm-immutable
  */
 final readonly class AuthenticatorData
 {
@@ -54,12 +53,11 @@ final readonly class AuthenticatorData
         public int $counter,
         public string $aaguid,
         public string $credentialId,
+        public Extensions $extensions,
     ) {}
 
     /**
      * The parsed data, or null if the bytes are shorter than the layout requires.
-     *
-     * @psalm-pure
      */
     public static function tryFromAttestation(string $bytes): ?self
     {
@@ -75,19 +73,23 @@ final readonly class AuthenticatorData
             return null;
         }
 
+        $publicKeyAndExtensions = mb_substr($bytes, self::CREDENTIAL_ID_OFFSET + $credentialIdLength, null, '8bit');
+        $publicKeyLength = Cbor::tryItemLength($publicKeyAndExtensions);
+
         return new self(
             self::rpIdHashOf($bytes),
             self::counterOf($bytes),
             mb_substr($bytes, self::AAGUID_OFFSET, self::AAGUID_LENGTH, '8bit'),
             mb_substr($bytes, self::CREDENTIAL_ID_OFFSET, $credentialIdLength, '8bit'),
+            $publicKeyLength === null
+                ? Extensions::none()
+                : Extensions::fromArea(mb_substr($publicKeyAndExtensions, $publicKeyLength, null, '8bit')),
         );
     }
 
     /**
-     * The rpIdHash and counter of an assertion, or null if the bytes are shorter than ASSERTION_LENGTH.
-     * Bytes after the counter are not interpreted.
-     *
-     * @psalm-pure
+     * The rpIdHash, counter and extensions of an assertion, or null if the bytes are shorter than
+     * ASSERTION_LENGTH.
      */
     public static function tryFromAssertion(string $bytes): ?self
     {
@@ -95,7 +97,13 @@ final readonly class AuthenticatorData
             return null;
         }
 
-        return new self(self::rpIdHashOf($bytes), self::counterOf($bytes), '', '');
+        return new self(
+            self::rpIdHashOf($bytes),
+            self::counterOf($bytes),
+            '',
+            '',
+            Extensions::fromArea(mb_substr($bytes, self::ASSERTION_LENGTH, null, '8bit')),
+        );
     }
 
     /**

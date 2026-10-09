@@ -114,7 +114,7 @@ try {
 // $key->keyIdBase64Url(), $key->publicKeyPem, $key->environment->value, $key->counter (0) and $key->receipt
 ```
 
-`verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed): AttestedKey`
+`verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey`
 performs Apple's attestation steps in order:
 
 1. The document is an `apple-appattest` object with `attStmt.x5c`, `attStmt.receipt` and `authData`, and
@@ -130,6 +130,8 @@ performs Apple's attestation steps in order:
 6. The counter in `authData` is 0.
 7. The `aaguid` in `authData` names an environment in `$allowed`.
 8. The `credentialId` in `authData` equals the key id.
+9. Only if you pass a `LaunchPolicy`: the validation category and the bundle version in `authData` pass it
+   (see Launch Category and Bundle Version).
 
 `$clientDataHash` may be any length: the verifier hashes whatever bytes you pass, so it only has to match
 what the app passed to `attestKey()`. Most apps pass the SHA-256 of the challenge; Apple's own sample in
@@ -145,6 +147,11 @@ The returned `AttestedKey` is a readonly value object:
 * `string $receipt` — Apple's App Attest receipt, raw bytes, for your own use with Apple's fraud metric
   service; this library does not contact Apple.
 * `int $counter` — always 0 for a freshly attested key.
+* `?int $validationCategory` — the raw launch validation category in `authData`, or null if the device
+  sent none; kept as a number, so one Apple has not named yet is still reported.
+* `?string $bundleVersion` — the app's bundle version in `authData`, or null if the device sent none.
+* `validationCategory(): ?ValidationCategory` — the category as an enum case, or null if it is absent or a
+  number with no case.
 * `keyIdBase64Url(): string` — the key id as unpadded base64url, for storing or indexing it as text.
 
 ## Verifying a Request: Assertions
@@ -172,7 +179,7 @@ try {
 // and store $counter for the key atomically (see What You Must Do Yourself)
 ```
 
-`verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app): int`
+`verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
 performs Apple's assertion steps 1 to 5 and returns the new counter:
 
 1. The document is an object with a `signature` and an `authenticatorData` of at least 37 bytes.
@@ -181,6 +188,8 @@ performs Apple's assertion steps 1 to 5 and returns the new counter:
    is hashed once more by ECDSA itself.
 3. The `rpIdHash` in `authenticatorData` is the SHA-256 of your app id.
 4. The counter in `authenticatorData` is strictly greater than `$previousCounter`.
+5. Only if you pass a `LaunchPolicy`: the validation category and the bundle version in
+   `authenticatorData` pass it (Apple's steps 7 and 8, see Launch Category and Bundle Version).
 
 `$clientData` is raw bytes and is never parsed: what it holds is your protocol, not this library's.
 
@@ -190,6 +199,68 @@ private key or a key of another type. `$previousCounter` is the counter you stor
 after its attestation.
 
 `AssertionVerifier` has no constructor arguments: an assertion carries no certificate and no time.
+
+## Launch Category and Bundle Version
+
+Apple's list of attestation steps ends with "Verify the `apple_validation_category_01` value" and "Verify
+the `apple_bundle_version_01` value", both "within the `extensions` CBOR dictionary in the authenticator
+data", and its assertion steps 7 and 8 say the same of `validationCategory` and `bundleVersion`. Newer OS
+versions append this map to `authData` after the credential public key, and to an assertion's
+`authenticatorData` after its 37 bytes:
+
+* the **validation category**, a `UInt32` that Apple calls "the launch `ValidationCategory` of your app":
+  how the executable was signed and distributed, numbered as in Apple's
+  [Defining launch environment and library constraints](https://developer.apple.com/documentation/security/defining-launch-environment-and-library-constraints);
+* the **bundle version**, a string "representing the version of the distributed App".
+
+Apple names no value you must accept and says nothing of a device that sends neither, and older devices
+do send neither: none of the iOS 14 vectors this library is tested with carries them. So the library
+reports the values and enforces them only when you ask. Without a policy, nothing about them is checked,
+and an extensions area that is missing or malformed is ignored.
+
+`Oire\AppAttest\Value\ValidationCategory` is an int-backed enum: `Platform` (1, an operating system
+executable), `TestFlight` (2), `Development` (3, signed by a development identity), `AppStore` (4),
+`Enterprise` (5, an enterprise provisioning profile or ad hoc distribution), `DeveloperId` (6) and `None`
+(10, a signing identity that matches no other category). Apple keeps 7 to 9 for binaries the system
+generates in restricted situations and names none of them, so they have no case: `AttestedKey` still
+reports such a number in `$validationCategory`, and no policy allows it.
+
+Pass a `LaunchPolicy` as the last argument of either `verify()` to enforce them:
+
+```php
+use Oire\AppAttest\Value\LaunchPolicy;
+use Oire\AppAttest\Value\ValidationCategory;
+
+$policy = LaunchPolicy::allowing(ValidationCategory::AppStore, ValidationCategory::TestFlight)
+    ->withBundleVersion(static fn(string $version): bool => version_compare($version, '2.0', '>='));
+
+$key = $verifier->verify($attestation, $clientDataHash, $keyId, $app, [Environment::Production], $policy);
+$counter = (new AssertionVerifier())->verify($assertion, $clientData, $stored->publicKeyPem, $stored->counter, $app, $policy);
+```
+
+* `LaunchPolicy::allowing(ValidationCategory ...$categories)` allows these categories and leaves the
+  bundle version unchecked; `new LaunchPolicy()` checks nothing, and
+  `new LaunchPolicy($categories, $acceptsBundleVersion)` takes both parts at once.
+* `withBundleVersion(Closure $accepts)` returns a copy that also requires a bundle version for which the
+  closure returns `true`.
+* With a policy that lists categories, a category that is absent, has no enum case or is not listed fails
+  with `ValidationCategory`. With a bundle version closure, a bundle version that is absent or that the
+  closure does not accept fails with `BundleVersion`. Both checks run after every other check, the
+  category first.
+
+The values are read leniently, because Apple documents only their names and types. The category counts
+when it is four little-endian bytes (as in Apple's sample) or a CBOR unsigned integer of at most
+2^32 − 1; the bundle version when it is a text string. Both verifiers accept both spellings,
+`apple_validation_category_01` or `validationCategory` and `apple_bundle_version_01` or `bundleVersion`;
+when both hold a usable value, the `apple_…_01` one wins. A value of another type, or an extensions area that is not exactly one CBOR map
+with distinct text-string keys and nothing after it, counts as absent.
+
+Apple's own attestation sample carries category 1 and bundle version `"1"`, and the library reports both.
+No genuine assertion sample with these values exists, so the assertion side is tested only with
+assertions the test builders sign, and with Apple's iOS 14 assertions, which carry none. Before you
+enforce a policy in production, check what your own users' devices send: verify without a policy for a
+while and look at `AttestedKey::$validationCategory` and `$bundleVersion`. `version_compare()`, as in the
+example, treats `"1"` as lower than `"1.0"`, so compare versions the way your app numbers them.
 
 ## Failures
 
@@ -224,6 +295,10 @@ log. Do not send them to the client: refuse with a generic answer.
 * `RpIdHash` — the key belongs to another team or bundle.
 * `Counter` — the counter in `authData` is not 0.
 * `Environment` — the `aaguid` names an environment not in `$allowed`, or none at all.
+* `ValidationCategory` — only with a `LaunchPolicy` that lists categories: the validation category in
+  `authData` is absent, has no `ValidationCategory` case, or is not listed.
+* `BundleVersion` — only with a `LaunchPolicy` that checks the bundle version: the bundle version in
+  `authData` is absent or refused by the policy's closure.
 
 ### Assertion Failure Reasons
 
@@ -235,6 +310,8 @@ log. Do not send them to the client: refuse with a generic answer.
 * `Signature` — the signature does not verify with the public key over this client data.
 * `RpIdHash` — the assertion was made for another team or bundle.
 * `Counter` — the counter did not grow: a replayed or reordered assertion.
+* `ValidationCategory` and `BundleVersion` — only with a `LaunchPolicy`, as for attestations, about the
+  values in `authenticatorData`.
 
 ### Caller Errors
 
@@ -245,6 +322,7 @@ cannot be mistaken for a forged request:
 * a `BundleId` that is empty or holds anything but ASCII letters, digits, hyphens and periods;
 * a `$publicKeyPem` that is not one uncompressed P-256 `PUBLIC KEY` PEM block;
 * a `$previousCounter` outside 0 to 2^32 − 1;
+* a `LaunchPolicy` category list holding anything but `ValidationCategory` cases;
 * a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate.
 
 A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
@@ -278,6 +356,8 @@ The library verifies; everything around verification is yours:
   ```
 
 * **Decide which environments to accept,** and pass them as `$allowed`.
+* **Decide whether to enforce the launch values,** and pass a `LaunchPolicy` if you do (see Launch Category
+  and Bundle Version).
 
 ## Development and Production Keys
 
@@ -370,7 +450,9 @@ $counter = (new AssertionVerifier())->verify($assertion, $clientData, $publicKey
 ```
 
 A signature over the bare `authenticatorData` followed by the SHA-256 of `clientData`, without hashing
-them into the nonce first, is refused with `Signature`. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library
+them into the nonce first, is refused with `Signature`. To test a `LaunchPolicy`, append a CBOR map such as
+`{"validationCategory": 4, "bundleVersion": "2.1"}` to the 37 bytes of `authenticatorData` before forming
+the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library
 already requires.
 
 Attestations are harder to make, because they need a certificate chain with the nonce extension. This
@@ -384,9 +466,9 @@ test code is not part of the Composer package.
 `Oire\AppAttest`:
 
 * `AttestationVerifier::__construct(?TrustAnchor $root = null, ?ClockInterface $clock = null)`
-* `AttestationVerifier::verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed): AttestedKey`,
+* `AttestationVerifier::verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey`,
   where `$allowed` is a list of `Environment` cases
-* `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app): int`
+* `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
 * `TrustAnchor::apple(): TrustAnchor` and `TrustAnchor::fromPem(string $pem): TrustAnchor`
 * `TrustAnchor::APPLE_ROOT_SHA256`, the pinned fingerprint as lowercase hexadecimal, and
   `TrustAnchor::$pem`, the root certificate as PEM
@@ -400,8 +482,15 @@ test code is not part of the Composer package.
   and `rpIdHash(): string` (its SHA-256, raw bytes)
 * `Environment`, a string-backed enum with the cases `Production` (`'production'`) and `Development`
   (`'development'`), `aaguid(): string` and `Environment::tryFromAaguid(string $aaguid): ?Environment`
-* `AttestedKey::__construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt)`,
+* `AttestedKey::__construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt, ?int $validationCategory = null, ?string $bundleVersion = null)`,
   described under Registering a Key
+* `ValidationCategory`, an int-backed enum: `Platform` (1), `TestFlight` (2), `Development` (3),
+  `AppStore` (4), `Enterprise` (5), `DeveloperId` (6) and `None` (10)
+* `LaunchPolicy::__construct(array $validationCategories = [], ?Closure $acceptsBundleVersion = null)`, with
+  `public readonly array $validationCategories` (a list of `ValidationCategory` cases),
+  `public readonly ?Closure $acceptsBundleVersion`, `LaunchPolicy::allowing(ValidationCategory ...$categories): LaunchPolicy`,
+  `withBundleVersion(Closure $accepts): LaunchPolicy`, `allowsValidationCategory(?int $category): bool` and
+  `acceptsBundleVersion(?string $bundleVersion): bool`, described under Launch Category and Bundle Version
 
 `Oire\AppAttest\Exception`: `AppAttestException`, `AttestationException`, `AttestationFailureReason`,
 `AssertionException` and `AssertionFailureReason`, described under Failures.

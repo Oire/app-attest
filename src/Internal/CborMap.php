@@ -31,16 +31,16 @@ namespace Oire\AppAttest\Internal;
 final readonly class CborMap
 {
     /**
-     * @param array<array-key, string|CborText|CborMap|list<mixed>|null> $entries by text-string key
+     * @param array<array-key, string|int|CborText|CborMap|list<mixed>|null> $entries by text-string key
      */
     public function __construct(
         private array $entries,
     ) {}
 
     /**
-     * @return string|CborText|self|list<mixed>|null
+     * @return string|int|CborText|self|list<mixed>|null
      */
-    public function get(string $key): array|CborText|self|string|null
+    public function get(string $key): array|CborText|int|self|string|null
     {
         return $this->entries[$key] ?? null;
     }

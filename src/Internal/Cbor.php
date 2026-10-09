@@ -14,9 +14,8 @@ use CBOR\IndefiniteLengthTextStringObject;
 use CBOR\ListObject;
 use CBOR\MapItem;
 use CBOR\MapObject;
-use CBOR\StringStream;
 use CBOR\TextStringObject;
-use InvalidArgumentException;
+use CBOR\UnsignedIntegerObject;
 use Throwable;
 use UnexpectedValueException;
 
@@ -41,9 +40,10 @@ use UnexpectedValueException;
  * Decodes untrusted CBOR without letting a decoder error or a PHP warning escape.
  *
  * Only what App Attest documents hold survives decoding: byte strings become strings, text strings become
- * CborText, lists become lists and maps become CborMap, so a map never passes for a list whatever its keys.
- * Any other value, such as an integer, becomes null, so it cannot pass for what the document needs. A map
- * with a key that is not a text string, or with the same key twice, makes the whole document refused.
+ * CborText, unsigned integers that fit become ints, lists become lists and maps become CborMap, so a map
+ * never passes for a list whatever its keys. Any other value, such as a negative integer or a tag, becomes
+ * null, so it cannot pass for what the document needs. A map with a key that is not a text string, or with
+ * the same key twice, makes the whole document refused.
  *
  * @internal
  */
@@ -57,10 +57,10 @@ final class Cbor
     {
         try {
             return ErrorGuard::call(static function() use ($bytes): ?CborMap {
-                $stream = StringStream::create($bytes);
+                $stream = new CborStream($bytes);
                 $object = Decoder::create()->decode($stream);
 
-                if (self::hasMore($stream) || !($object instanceof MapObject || $object instanceof IndefiniteLengthMapObject)) {
+                if ($stream->hasMore() || !($object instanceof MapObject || $object instanceof IndefiniteLengthMapObject)) {
                     return null;
                 }
 
@@ -71,25 +71,33 @@ final class Cbor
         }
     }
 
-    private static function hasMore(StringStream $stream): bool
+    /**
+     * The number of bytes the CBOR item at the start of the bytes takes, whatever it holds and whatever follows
+     * it, or null if no item decodes there.
+     */
+    public static function tryItemLength(string $bytes): ?int
     {
         try {
-            $stream->read(1);
-        } catch (InvalidArgumentException) {
-            return false;
-        }
+            return ErrorGuard::call(static function() use ($bytes): int {
+                $stream = new CborStream($bytes);
+                Decoder::create()->decode($stream);
 
-        return true;
+                return $stream->offset();
+            });
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**
      * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
      *
-     * @return string|CborText|CborMap|list<mixed>|null
+     * @return string|int|CborText|CborMap|list<mixed>|null
      */
-    private static function convert(CBORObject $object): array|CborMap|CborText|string|null
+    private static function convert(CBORObject $object): array|CborMap|CborText|int|string|null
     {
         return match (true) {
+            $object instanceof UnsignedIntegerObject => filter_var($object->getValue(), FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE),
             $object instanceof ByteStringObject,
             $object instanceof IndefiniteLengthByteStringObject => $object->getValue(),
             $object instanceof TextStringObject,
@@ -107,7 +115,7 @@ final class Cbor
      *
      * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
      *
-     * @return list<string|CborText|CborMap|list<mixed>|null>
+     * @return list<string|int|CborText|CborMap|list<mixed>|null>
      */
     private static function convertList(iterable $list): array
     {

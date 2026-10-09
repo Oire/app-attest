@@ -64,6 +64,7 @@ final class AttestationBuilder
     private ?string $credentialPublicKeyPem = null;
     private bool $rootExpired = false;
     private ?string $unlistedIssuerUrl = null;
+    private string $extensions = '';
 
     private function __construct()
     {
@@ -236,6 +237,17 @@ final class AttestationBuilder
     }
 
     /**
+     * Bytes after the credential public key in authData, such as an extensions map (ExtensionsMap).
+     */
+    public function withExtensions(string $bytes): self
+    {
+        $builder = clone $this;
+        $builder->extensions = $bytes;
+
+        return $builder;
+    }
+
+    /**
      * The DER of the nonce extension's value for a nonce.
      *
      * @psalm-pure
@@ -352,7 +364,8 @@ final class AttestationBuilder
             . $this->aaguid
             . pack('n', mb_strlen($credentialId, '8bit'))
             . $credentialId
-            . (string) $coseKey;
+            . (string) $coseKey
+            . $this->extensions;
     }
 
     /**

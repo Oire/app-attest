@@ -30,13 +30,16 @@ use Oire\AppAttest\Tests\Support\BuiltAttestation;
 use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
+use Oire\AppAttest\Tests\Support\ExtensionsMap;
 use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\AttestedKey;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
+use Oire\AppAttest\Value\LaunchPolicy;
 use Oire\AppAttest\Value\TeamId;
+use Oire\AppAttest\Value\ValidationCategory;
 use Override;
 use phpseclib3\File\ASN1;
 use phpseclib3\File\X509;
@@ -65,6 +68,7 @@ use Symfony\Component\Clock\MockClock;
 final class AttestationVerifierTest extends TestCase
 {
     private const string MUTATED_VECTOR = 'veehaitch-ios-14.4';
+    private const string GUIDE_VECTOR = 'takimoto3-apple-guide';
 
     /**
      * @return iterable<string, array{AttestationVector}>
@@ -742,6 +746,299 @@ final class AttestationVerifierTest extends TestCase
         );
     }
 
+    public function testGuideVectorReportsItsLaunchValues(): void
+    {
+        $key = self::verifyVector(Fixtures::attestation(self::GUIDE_VECTOR));
+
+        self::assertSame(1, $key->validationCategory);
+        self::assertSame(ValidationCategory::Platform, $key->validationCategory());
+        self::assertSame('1', $key->bundleVersion);
+    }
+
+    public function testGuideVectorPassesAPolicyAllowingItsLaunchValues(): void
+    {
+        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
+        $policies = [
+            LaunchPolicy::allowing(ValidationCategory::Platform),
+            LaunchPolicy::allowing(ValidationCategory::AppStore, ValidationCategory::Platform)->withBundleVersion(static fn(string $version): bool => $version === '1'),
+            (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version !== ''),
+            new LaunchPolicy(),
+        ];
+
+        foreach ($policies as $policy) {
+            self::assertSame($vector->keyId, self::verifyVector($vector, launchPolicy: $policy)->keyId);
+        }
+    }
+
+    public function testGuideVectorFailsAnAppStoreOnlyPolicy(): void
+    {
+        $policy = LaunchPolicy::allowing(ValidationCategory::AppStore);
+
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyVector(Fixtures::attestation(self::GUIDE_VECTOR), launchPolicy: $policy));
+    }
+
+    public function testGuideVectorFailsAPolicyWantingAnotherBundleVersion(): void
+    {
+        $policy = LaunchPolicy::allowing(ValidationCategory::Platform)->withBundleVersion(static fn(string $version): bool => $version === '2.0');
+
+        self::assertFailure(AttestationFailureReason::BundleVersion, static fn() => self::verifyVector(Fixtures::attestation(self::GUIDE_VECTOR), launchPolicy: $policy));
+    }
+
+    /**
+     * @return iterable<string, array{AttestationVector}>
+     */
+    public static function provideVectorsWithoutLaunchValues(): iterable
+    {
+        foreach (Fixtures::attestations() as $name => $vector) {
+            if ($name !== self::GUIDE_VECTOR) {
+                yield $name => [$vector];
+            }
+        }
+    }
+
+    #[DataProvider('provideVectorsWithoutLaunchValues')]
+    public function testVectorWithoutLaunchValuesReportsNoneAndFailsAPolicy(AttestationVector $vector): void
+    {
+        $key = self::verifyVector($vector);
+
+        self::assertNull($key->validationCategory);
+        self::assertNull($key->validationCategory());
+        self::assertNull($key->bundleVersion);
+        self::assertSame($vector->keyId, self::verifyVector($vector, launchPolicy: new LaunchPolicy())->keyId);
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyVector($vector, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        self::assertFailure(
+            AttestationFailureReason::BundleVersion,
+            static fn() => self::verifyVector($vector, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(): bool => true)),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideCategoryEncodings(): iterable
+    {
+        yield 'four little-endian bytes' => [ExtensionsMap::apple(4, '2.1')];
+        yield 'unsigned integer' => [ExtensionsMap::of([
+            ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(4),
+            ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+        ])];
+        yield 'short spellings' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+        ])];
+        yield 'short spellings, unsigned integer' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(4),
+        ])];
+        yield 'after unknown entries' => [ExtensionsMap::of([
+            'apple_other_01' => ExtensionsMap::text('x'),
+            ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
+            ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+        ])];
+    }
+
+    #[DataProvider('provideCategoryEncodings')]
+    public function testBuiltLaunchValuesAreReportedAndEnforced(string $extensions): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions($extensions)
+            ->build();
+        $key = self::verifyBuilt($attestation);
+
+        self::assertSame(4, $key->validationCategory);
+        self::assertSame(ValidationCategory::AppStore, $key->validationCategory());
+        self::assertSame('2.1', $key->bundleVersion);
+        self::assertSame(
+            $attestation->keyId,
+            self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)->withBundleVersion(static fn(string $version): bool => $version === '2.1'))->keyId,
+        );
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(ValidationCategory::TestFlight)));
+        self::assertFailure(
+            AttestationFailureReason::BundleVersion,
+            static fn() => self::verifyBuilt($attestation, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version === '2.0')),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideUnknownCategories(): iterable
+    {
+        yield 'zero' => [0];
+        yield 'restricted 7' => [7];
+        yield 'restricted 8' => [8];
+        yield 'restricted 9' => [9];
+        yield 'eleven' => [11];
+        yield 'largest UInt32' => [0xFFFFFFFF];
+    }
+
+    #[DataProvider('provideUnknownCategories')]
+    public function testUnknownCategoryIsReportedButNeverAllowed(int $category): void
+    {
+        foreach ([ExtensionsMap::categoryBytes($category), ExtensionsMap::categoryInteger($category)] as $encoded) {
+            $attestation = AttestationBuilder::create()
+                ->withExtensions(ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => $encoded]))
+                ->build();
+            $key = self::verifyBuilt($attestation);
+
+            self::assertSame($category, $key->validationCategory);
+            self::assertNull($key->validationCategory());
+            self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideValuesOfTheWrongType(): iterable
+    {
+        yield 'three bytes' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => ByteStringObject::create("\x04\x00\x00"), ExtensionsMap::BUNDLE_VERSION => ByteStringObject::create('2.1')])];
+        yield 'five bytes' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => ByteStringObject::create("\x04\x00\x00\x00\x00"), ExtensionsMap::BUNDLE_VERSION => UnsignedIntegerObject::create(2)])];
+        yield 'integer above UInt32' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => UnsignedIntegerObject::create(0x100000004), ExtensionsMap::BUNDLE_VERSION => ListObject::create([ExtensionsMap::text('2.1')])])];
+        yield 'negative integer' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => NegativeIntegerObject::create(-4), ExtensionsMap::BUNDLE_VERSION => MapObject::create()])];
+        yield 'text' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::text('4'), ExtensionsMap::BUNDLE_VERSION => NegativeIntegerObject::create(-1)])];
+        yield 'indefinite-length text' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => IndefiniteLengthTextStringObject::create()->append("\x04\x00\x00\x00")])];
+    }
+
+    #[DataProvider('provideValuesOfTheWrongType')]
+    public function testValueOfTheWrongTypeCountsAsAbsent(string $extensions): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions($extensions)
+            ->build();
+        $key = self::verifyBuilt($attestation);
+
+        self::assertNull($key->validationCategory);
+        self::assertNull($key->bundleVersion);
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        self::assertFailure(
+            AttestationFailureReason::BundleVersion,
+            static fn() => self::verifyBuilt($attestation, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(): bool => true)),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideMalformedExtensions(): iterable
+    {
+        foreach (ExtensionsMap::malformed() as $name => $bytes) {
+            yield $name => [$bytes];
+        }
+    }
+
+    #[DataProvider('provideMalformedExtensions')]
+    public function testMalformedExtensionsYieldNoValuesAndFailOnlyAPolicy(string $extensions): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions($extensions)
+            ->build();
+        $key = self::verifyBuilt($attestation);
+
+        self::assertSame($attestation->keyId, $key->keyId);
+        self::assertNull($key->validationCategory);
+        self::assertNull($key->bundleVersion);
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
+        self::assertFailure(
+            AttestationFailureReason::BundleVersion,
+            static fn() => self::verifyBuilt($attestation, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(): bool => true)),
+        );
+    }
+
+    public function testMissingValueFailsOnlyThePartOfThePolicyThatNeedsIt(): void
+    {
+        $versionOnly = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of([ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('3')]))
+            ->build();
+        $categoryOnly = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(2)]))
+            ->build();
+        $anyVersion = (new LaunchPolicy())->withBundleVersion(static fn(): bool => true);
+
+        self::assertNull(self::verifyBuilt($versionOnly)->validationCategory);
+        self::assertSame('3', self::verifyBuilt($versionOnly, launchPolicy: $anyVersion)->bundleVersion);
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($versionOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::TestFlight)));
+        self::assertNull(self::verifyBuilt($categoryOnly)->bundleVersion);
+        self::assertSame(ValidationCategory::TestFlight, self::verifyBuilt($categoryOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::TestFlight))->validationCategory());
+        self::assertFailure(AttestationFailureReason::BundleVersion, static fn() => self::verifyBuilt($categoryOnly, launchPolicy: $anyVersion));
+    }
+
+    public function testAppleSpellingWinsOverTheShortOne(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of([
+                ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(3),
+                ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('short'),
+                ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
+                ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('apple'),
+            ]))
+            ->build();
+        $key = self::verifyBuilt($attestation);
+
+        self::assertSame(4, $key->validationCategory);
+        self::assertSame('apple', $key->bundleVersion);
+    }
+
+    public function testShortSpellingIsReadWhenTheAppleOneHoldsNoUsableValue(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of([
+                ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::text('4'),
+                ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(6),
+            ]))
+            ->build();
+
+        self::assertSame(ValidationCategory::DeveloperId, self::verifyBuilt($attestation)->validationCategory());
+    }
+
+    public function testLaunchPolicyIsCheckedAfterEveryOtherCheck(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $refusing = LaunchPolicy::allowing(ValidationCategory::AppStore)->withBundleVersion(static fn(): bool => false);
+        $verifier = new AttestationVerifier($attestation->trustAnchor(), $attestation->clock());
+        $otherApp = new AppIdentity(new TeamId('ZYXWV98765'), new BundleId('org.example.other'));
+
+        self::assertFailure(
+            AttestationFailureReason::Nonce,
+            static fn() => $verifier->verify($attestation->cbor, hash('sha256', 'other', true), $attestation->keyId, $attestation->app, [Environment::Development], $refusing),
+        );
+        self::assertFailure(
+            AttestationFailureReason::RpIdHash,
+            static fn() => $verifier->verify($attestation->cbor, $attestation->clientDataHash, $attestation->keyId, $otherApp, [Environment::Development], $refusing),
+        );
+        self::assertFailure(
+            AttestationFailureReason::Environment,
+            static fn() => $verifier->verify($attestation->cbor, $attestation->clientDataHash, $attestation->keyId, $attestation->app, [Environment::Production], $refusing),
+        );
+        self::assertFailure(AttestationFailureReason::ValidationCategory, static fn() => self::verifyBuilt($attestation, launchPolicy: $refusing));
+    }
+
+    public function testCredentialIdMismatchComesBeforeTheLaunchPolicy(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withCredentialId(hash('sha256', 'not the key id', true))
+            ->withExtensions(ExtensionsMap::apple(4, '1.0'))
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::KeyId, static fn() => self::verifyBuilt($attestation, launchPolicy: LaunchPolicy::allowing(ValidationCategory::TestFlight)));
+    }
+
+    public function testDamagedExtensionsNeverRaiseAPhpError(): void
+    {
+        $extensions = ExtensionsMap::apple(4, '1.0');
+
+        foreach (Damage::of($extensions, [0x80, 0xFF]) as $damaged) {
+            $attestation = AttestationBuilder::create()
+                ->withExtensions($damaged->bytes)
+                ->build();
+            $key = Damage::withoutPhpErrors(static fn(): AttestedKey => self::verifyBuilt($attestation));
+
+            self::assertSame($attestation->keyId, $key->keyId, 'Damage at extensions byte ' . $damaged->offset . '.');
+        }
+    }
+
     /**
      * @param list<Environment> $allowed
      */
@@ -753,6 +1050,7 @@ final class AttestationVerifierTest extends TestCase
         ?array $allowed = null,
         ?ClockInterface $clock = null,
         ?string $cbor = null,
+        ?LaunchPolicy $launchPolicy = null,
     ): AttestedKey {
         return (new AttestationVerifier(null, $clock ?? $vector->clock()))->verify(
             $cbor ?? $vector->bytes,
@@ -760,20 +1058,26 @@ final class AttestationVerifierTest extends TestCase
             $keyId ?? $vector->keyId,
             $app ?? $vector->app(),
             $allowed ?? [$vector->environment],
+            $launchPolicy,
         );
     }
 
     /**
      * @param list<Environment> $allowed
      */
-    private static function verifyBuilt(BuiltAttestation $attestation, array $allowed = [Environment::Development], ?string $cbor = null): AttestedKey
-    {
+    private static function verifyBuilt(
+        BuiltAttestation $attestation,
+        array $allowed = [Environment::Development],
+        ?string $cbor = null,
+        ?LaunchPolicy $launchPolicy = null,
+    ): AttestedKey {
         return (new AttestationVerifier($attestation->trustAnchor(), $attestation->clock()))->verify(
             $cbor ?? $attestation->cbor,
             $attestation->clientDataHash,
             $attestation->keyId,
             $attestation->app,
             $allowed,
+            $launchPolicy,
         );
     }
 

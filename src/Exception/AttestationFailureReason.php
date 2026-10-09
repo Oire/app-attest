@@ -35,4 +35,6 @@ enum AttestationFailureReason
     case RpIdHash;
     case Counter;
     case Environment;
+    case ValidationCategory;
+    case BundleVersion;
 }

@@ -36,6 +36,7 @@ final class AssertionBuilder
     private const int FLAGS = 0x40;
     private AppIdentity $app;
     private int $counter = 1;
+    private string $extensions = '';
 
     /**
      * @psalm-capabilities read-props
@@ -82,11 +83,22 @@ final class AssertionBuilder
     }
 
     /**
+     * Bytes after the counter in authenticatorData, such as an extensions map (ExtensionsMap).
+     */
+    public function withExtensions(string $bytes): self
+    {
+        $builder = clone $this;
+        $builder->extensions = $bytes;
+
+        return $builder;
+    }
+
+    /**
      * The assertion object for this client data.
      */
     public function build(string $clientData): string
     {
-        $authenticatorData = $this->app->rpIdHash() . chr(self::FLAGS) . pack('N', $this->counter);
+        $authenticatorData = $this->app->rpIdHash() . chr(self::FLAGS) . pack('N', $this->counter) . $this->extensions;
 
         $nonce = hash('sha256', $authenticatorData . hash('sha256', $clientData, true), true);
 

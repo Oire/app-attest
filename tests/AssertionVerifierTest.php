@@ -28,12 +28,15 @@ use Oire\AppAttest\Tests\Support\AuthDataLayout;
 use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
+use Oire\AppAttest\Tests\Support\ExtensionsMap;
 use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\Tests\Support\TestApp;
 use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\BundleId;
+use Oire\AppAttest\Value\LaunchPolicy;
 use Oire\AppAttest\Value\TeamId;
+use Oire\AppAttest\Value\ValidationCategory;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -464,6 +467,130 @@ final class AssertionVerifierTest extends TestCase
         (new AssertionVerifier())->verify('garbage', self::CLIENT_DATA, AssertionBuilder::create()->publicKeyPem(), -1, TestApp::identity());
     }
 
+    #[DataProvider('provideGenuineVectors')]
+    public function testGenuineVectorWithoutLaunchValuesFailsOnlyAPolicyThatNeedsThem(AssertionVector $vector): void
+    {
+        self::assertSame($vector->expectedCounter, self::verifyVector($vector, launchPolicy: new LaunchPolicy()));
+        self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyVector($vector, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        self::assertFailure(
+            AssertionFailureReason::BundleVersion,
+            static fn() => self::verifyVector($vector, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(): bool => true)),
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideLaunchValueEncodings(): iterable
+    {
+        yield 'short spellings, unsigned integer' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(2),
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('4.2'),
+        ])];
+        yield 'short spellings, four little-endian bytes' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('4.2'),
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(2),
+        ])];
+        yield 'Apple spellings, four little-endian bytes' => [ExtensionsMap::apple(2, '4.2')];
+        yield 'Apple spellings, unsigned integer' => [ExtensionsMap::of([
+            ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(2),
+            ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('4.2'),
+        ])];
+    }
+
+    #[DataProvider('provideLaunchValueEncodings')]
+    public function testBuiltLaunchValuesAreEnforced(string $extensions): void
+    {
+        $builder = AssertionBuilder::create()
+            ->withCounter(3)
+            ->withExtensions($extensions);
+        $passing = LaunchPolicy::allowing(ValidationCategory::TestFlight)->withBundleVersion(static fn(string $version): bool => $version === '4.2');
+
+        self::assertSame(3, self::verifyBuilt($builder));
+        self::assertSame(3, self::verifyBuilt($builder, launchPolicy: $passing));
+        self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
+        self::assertFailure(
+            AssertionFailureReason::BundleVersion,
+            static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(ValidationCategory::TestFlight)->withBundleVersion(static fn(string $version): bool => $version === '4.3')),
+        );
+    }
+
+    public function testUnknownCategoryIsNeverAllowed(): void
+    {
+        foreach ([0, 7, 8, 9, 11, self::MAX_COUNTER] as $category) {
+            $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger($category)]));
+
+            self::assertSame(1, self::verifyBuilt($builder));
+            self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideExtensionsWithoutUsableValues(): iterable
+    {
+        foreach (ExtensionsMap::malformed() as $name => $bytes) {
+            yield $name => [$bytes];
+        }
+
+        yield 'empty map' => [ExtensionsMap::of([])];
+        yield 'values of the wrong type' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::text('2'),
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ByteStringObject::create('4.2'),
+        ])];
+        yield 'category above UInt32' => [ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => UnsignedIntegerObject::create(0x100000002)])];
+        yield 'category of three bytes' => [ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ByteStringObject::create("\x02\x00\x00")])];
+    }
+
+    #[DataProvider('provideExtensionsWithoutUsableValues')]
+    public function testExtensionsWithoutUsableValuesFailOnlyAPolicy(string $extensions): void
+    {
+        $builder = AssertionBuilder::create()->withExtensions($extensions);
+
+        self::assertSame(1, self::verifyBuilt($builder));
+        self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
+        self::assertFailure(
+            AssertionFailureReason::BundleVersion,
+            static fn() => self::verifyBuilt($builder, launchPolicy: (new LaunchPolicy())->withBundleVersion(static fn(): bool => true)),
+        );
+    }
+
+    public function testMissingValueFailsOnlyThePartOfThePolicyThatNeedsIt(): void
+    {
+        $versionOnly = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('5')]));
+        $categoryOnly = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(4)]));
+        $anyVersion = (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version === '5');
+
+        self::assertSame(1, self::verifyBuilt($versionOnly, launchPolicy: $anyVersion));
+        self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($versionOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
+        self::assertSame(1, self::verifyBuilt($categoryOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
+        self::assertFailure(AssertionFailureReason::BundleVersion, static fn() => self::verifyBuilt($categoryOnly, launchPolicy: $anyVersion));
+    }
+
+    public function testLaunchPolicyIsCheckedAfterEveryOtherCheck(): void
+    {
+        $builder = AssertionBuilder::create()->withCounter(5);
+        $refusing = LaunchPolicy::allowing(ValidationCategory::AppStore)->withBundleVersion(static fn(): bool => false);
+        $verifier = new AssertionVerifier();
+        $assertion = $builder->build(self::CLIENT_DATA);
+        $otherApp = new AppIdentity(new TeamId(TestApp::TEAM_ID), new BundleId('com.example.other'));
+
+        self::assertFailure(AssertionFailureReason::Signature, static fn() => $verifier->verify($assertion, 'other', $builder->publicKeyPem(), 0, TestApp::identity(), $refusing));
+        self::assertFailure(AssertionFailureReason::RpIdHash, static fn() => $verifier->verify($assertion, self::CLIENT_DATA, $builder->publicKeyPem(), 0, $otherApp, $refusing));
+        self::assertFailure(AssertionFailureReason::Counter, static fn() => $verifier->verify($assertion, self::CLIENT_DATA, $builder->publicKeyPem(), 5, TestApp::identity(), $refusing));
+        self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => $verifier->verify($assertion, self::CLIENT_DATA, $builder->publicKeyPem(), 0, TestApp::identity(), $refusing));
+    }
+
+    public function testDamagedExtensionsNeverRaiseAPhpError(): void
+    {
+        foreach (Damage::of(ExtensionsMap::apple(2, '4.2'), [0x01, 0x80, 0xFF]) as $damaged) {
+            $builder = AssertionBuilder::create()->withExtensions($damaged->bytes);
+
+            self::assertSame(1, Damage::withoutPhpErrors(static fn(): int => self::verifyBuilt($builder)), 'Damage at extensions byte ' . $damaged->offset . '.');
+        }
+    }
+
     private static function verifyVector(
         AssertionVector $vector,
         ?string $clientData = null,
@@ -471,6 +598,7 @@ final class AssertionVerifierTest extends TestCase
         ?int $previousCounter = null,
         ?AppIdentity $app = null,
         ?string $cbor = null,
+        ?LaunchPolicy $launchPolicy = null,
     ): int {
         return (new AssertionVerifier())->verify(
             $cbor ?? $vector->bytes,
@@ -478,17 +606,24 @@ final class AssertionVerifierTest extends TestCase
             $publicKeyPem ?? $vector->publicKeyPem,
             $previousCounter ?? $vector->previousCounter,
             $app ?? $vector->app(),
+            $launchPolicy,
         );
     }
 
-    private static function verifyBuilt(AssertionBuilder $builder, int $previousCounter = 0, ?string $publicKeyPem = null, ?string $cbor = null): int
-    {
+    private static function verifyBuilt(
+        AssertionBuilder $builder,
+        int $previousCounter = 0,
+        ?string $publicKeyPem = null,
+        ?string $cbor = null,
+        ?LaunchPolicy $launchPolicy = null,
+    ): int {
         return (new AssertionVerifier())->verify(
             $cbor ?? $builder->build(self::CLIENT_DATA),
             self::CLIENT_DATA,
             $publicKeyPem ?? $builder->publicKeyPem(),
             $previousCounter,
             TestApp::identity(),
+            $launchPolicy,
         );
     }
 

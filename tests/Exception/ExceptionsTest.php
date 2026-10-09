@@ -81,11 +81,11 @@ final class ExceptionsTest extends TestCase
     public function testReasonsAreExactlyThePublicApiCases(): void
     {
         self::assertSame(
-            ['Format', 'CertificateChain', 'Nonce', 'KeyId', 'RpIdHash', 'Counter', 'Environment'],
+            ['Format', 'CertificateChain', 'Nonce', 'KeyId', 'RpIdHash', 'Counter', 'Environment', 'ValidationCategory', 'BundleVersion'],
             array_map(static fn(AttestationFailureReason $reason): string => $reason->name, AttestationFailureReason::cases()),
         );
         self::assertSame(
-            ['Format', 'Signature', 'RpIdHash', 'Counter'],
+            ['Format', 'Signature', 'RpIdHash', 'Counter', 'ValidationCategory', 'BundleVersion'],
             array_map(static fn(AssertionFailureReason $reason): string => $reason->name, AssertionFailureReason::cases()),
         );
     }

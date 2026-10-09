@@ -36,12 +36,12 @@ Psalm is pinned to `dev-master` and `config.platform.php` is 8.3.16, so CI and c
 ```text
 src/
   AttestationVerifier.php   # Apple's attestation steps, returns AttestedKey
-  AssertionVerifier.php     # Apple's assertion steps 1-5, returns the new counter
+  AssertionVerifier.php     # Apple's assertion steps 1-5 (7-8 with a LaunchPolicy), returns the new counter
   TrustAnchor.php           # Bundled Apple root, pinned SHA-256 checked on every load; fromPem() for tests
   SystemClock.php           # Default PSR-20 clock
-  Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey
+  Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey, ValidationCategory, LaunchPolicy
   Exception/                # AppAttestException (abstract), Attestation/AssertionException + reason enums
-  Internal/                 # @internal: Cbor, CborText, CborMap, AuthenticatorData, CertificateChain, EcPoint, NonceExtension, ErrorGuard
+  Internal/                 # @internal: Cbor, CborStream, CborText, CborMap, AuthenticatorData, Extensions, CertificateChain, EcPoint, NonceExtension, ErrorGuard
 resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
@@ -102,11 +102,17 @@ tests/
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.
-- The CBOR decoder keeps only strings, lists and maps, so an integer or a tag where a byte string belongs
-  is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`, so neither passes
+- The CBOR decoder keeps only strings, unsigned integers, lists and maps, so an integer or a tag where a
+  byte string belongs is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`, so neither passes
   for the other; maps decode to `Internal\CborMap`, never to PHP arrays, so a map keyed `"0"`, `"1"`
   cannot pass for a list. A key that is not a text string, a key twice, or bytes after the top-level map
   make it refuse the whole document.
+- `apple_validation_category_01` and `apple_bundle_version_01` (`validationCategory` and `bundleVersion` in
+  assertions) are entries of the `extensions` CBOR map in the authenticator data, after the COSE key, not
+  certificate extensions. Only Apple's guide sample carries them (the category as four little-endian
+  bytes), so they are reported and enforced only with a `LaunchPolicy`; a missing or malformed extensions
+  area is never a failure without one. `Cbor::tryItemLength()` skips the COSE key; the strict
+  `Cbor::tryDecodeMap()` reads the area after it.
 - Only a single uncompressed P-256 `PUBLIC KEY` PEM is accepted by `AssertionVerifier`, decoded by the
   library itself, so OpenSSL never reads a file path.
 - Before a release, re-fetch Apple's root and compare its fingerprint with `TrustAnchor::APPLE_ROOT_SHA256`.

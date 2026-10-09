@@ -10,8 +10,10 @@ use Oire\AppAttest\Exception\AssertionFailureReason;
 use Oire\AppAttest\Internal\AuthenticatorData;
 use Oire\AppAttest\Internal\Cbor;
 use Oire\AppAttest\Internal\EcPoint;
+use Oire\AppAttest\Internal\Extensions;
 use Oire\AppAttest\Internal\Pem;
 use Oire\AppAttest\Value\AppIdentity;
+use Oire\AppAttest\Value\LaunchPolicy;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -41,10 +43,11 @@ final readonly class AssertionVerifier
     private const int MAX_COUNTER = 0xFFFFFFFF;
 
     /**
-     * @param string $assertionCbor   the assertion object as raw bytes
-     * @param string $clientData      the client data the app signed, as raw bytes; never parsed here
-     * @param string $publicKeyPem    the key's public key, as AttestedKey::$publicKeyPem returned it
-     * @param int    $previousCounter the counter stored for the key, 0 after its attestation
+     * @param string        $assertionCbor   the assertion object as raw bytes
+     * @param string        $clientData      the client data the app signed, as raw bytes; never parsed here
+     * @param string        $publicKeyPem    the key's public key, as AttestedKey::$publicKeyPem returned it
+     * @param int           $previousCounter the counter stored for the key, 0 after its attestation
+     * @param ?LaunchPolicy $launchPolicy    the launch values the authenticator data must carry; none checked if null
      *
      * @throws InvalidArgumentException if the public key is not a PEM-encoded P-256 key or the previous
      *                                  counter is outside 0..2^32−1
@@ -52,7 +55,7 @@ final readonly class AssertionVerifier
      *
      * @return int the new counter, to store for the key
      */
-    public function verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app): int
+    public function verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int
     {
         $point = self::pointOf($publicKeyPem)
             ?? throw new InvalidArgumentException('The public key must be a PEM-encoded uncompressed P-256 public key.');
@@ -87,7 +90,25 @@ final readonly class AssertionVerifier
             throw new AssertionException(AssertionFailureReason::Counter, 'The authenticator data counter is not greater than the previous counter.');
         }
 
+        if ($launchPolicy !== null) {
+            self::enforce($launchPolicy, $authData->extensions);
+        }
+
         return $authData->counter;
+    }
+
+    /**
+     * @throws AssertionException if the launch values do not pass the policy
+     */
+    private static function enforce(LaunchPolicy $launchPolicy, Extensions $extensions): void
+    {
+        if (!$launchPolicy->allowsValidationCategory($extensions->validationCategory)) {
+            throw new AssertionException(AssertionFailureReason::ValidationCategory, 'The authenticator data carries no validation category the launch policy allows.');
+        }
+
+        if (!$launchPolicy->acceptsBundleVersion($extensions->bundleVersion)) {
+            throw new AssertionException(AssertionFailureReason::BundleVersion, 'The authenticator data carries no bundle version the launch policy accepts.');
+        }
     }
 
     /**

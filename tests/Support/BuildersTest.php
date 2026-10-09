@@ -144,6 +144,26 @@ final class BuildersTest extends TestCase
         self::assertSame(str_repeat("\xff", 16), mb_substr($unknown->authData, AuthDataLayout::AAGUID_OFFSET, AuthDataLayout::AAGUID_LENGTH, '8bit'));
     }
 
+    public function testExtensionsFollowTheCredentialPublicKey(): void
+    {
+        $extensions = ExtensionsMap::apple(4, '2.1');
+        $plain = AttestationBuilder::create()->build();
+        $extended = AttestationBuilder::create()
+            ->withExtensions($extensions)
+            ->build();
+
+        self::assertSame($extensions, mb_substr($extended->authData, -mb_strlen($extensions, '8bit'), null, '8bit'));
+        self::assertSame(mb_strlen($plain->authData, '8bit') + mb_strlen($extensions, '8bit'), mb_strlen($extended->authData, '8bit'));
+        self::assertSame(
+            AttestationBuilder::nonceExtensionDer(hash('sha256', $extended->authData . $extended->clientDataHash, true)),
+            self::nonceExtensionOf($extended->credentialDer),
+        );
+        self::assertSame(
+            [ExtensionsMap::BUNDLE_VERSION => '2.1', ExtensionsMap::VALIDATION_CATEGORY => "\x04\x00\x00\x00"],
+            self::decode($extensions),
+        );
+    }
+
     public function testCredentialKeyCanStartWithAZeroByte(): void
     {
         $attestation = AttestationBuilder::create()
@@ -258,6 +278,20 @@ final class BuildersTest extends TestCase
 
         self::assertSame($app->rpIdHash(), mb_substr($authenticatorData, 0, AuthDataLayout::RP_ID_HASH_LENGTH, '8bit'));
         self::assertSame(5, self::counterOf($authenticatorData));
+        self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
+    }
+
+    public function testAssertionExtensionsFollowTheCounterAndAreSigned(): void
+    {
+        $extensions = ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(2)]);
+        $builder = AssertionBuilder::create()->withExtensions($extensions);
+        $document = self::decode($builder->build('client data'));
+        $authenticatorData = $document['authenticatorData'] ?? null;
+        $signature = $document['signature'] ?? null;
+        self::assertIsString($authenticatorData);
+        self::assertIsString($signature);
+
+        self::assertSame($extensions, mb_substr($authenticatorData, AuthDataLayout::ASSERTION_LENGTH, null, '8bit'));
         self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
     }
 

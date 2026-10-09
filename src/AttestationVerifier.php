@@ -13,9 +13,11 @@ use Oire\AppAttest\Internal\CborMap;
 use Oire\AppAttest\Internal\CborText;
 use Oire\AppAttest\Internal\CertificateChain;
 use Oire\AppAttest\Internal\EcPoint;
+use Oire\AppAttest\Internal\Extensions;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\AttestedKey;
 use Oire\AppAttest\Value\Environment;
+use Oire\AppAttest\Value\LaunchPolicy;
 use Psr\Clock\ClockInterface;
 
 /**
@@ -62,11 +64,12 @@ final readonly class AttestationVerifier
      * @param string            $clientDataHash  raw bytes, formed the way the app formed them
      * @param string            $keyId           raw bytes, as the app reported it
      * @param list<Environment> $allowed         the environments a key may come from
+     * @param ?LaunchPolicy     $launchPolicy    the launch values the authenticator data must carry; none checked if null
      *
      * @throws AttestationException if the attestation fails a check; its reason names the check
      * @throws LogicException       if the process has registered another phpseclib map for the nonce extension
      */
-    public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed): AttestedKey
+    public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey
     {
         $document = Cbor::tryDecodeMap($attestationCbor);
         $attStmt = $document?->get('attStmt');
@@ -118,7 +121,32 @@ final readonly class AttestationVerifier
             throw new AttestationException(AttestationFailureReason::KeyId, 'The authenticator data credentialId does not match the key id.');
         }
 
-        return new AttestedKey($point->keyId(), $point->publicKeyPem(), $environment, $receipt);
+        if ($launchPolicy !== null) {
+            self::enforce($launchPolicy, $authData->extensions);
+        }
+
+        return new AttestedKey(
+            $point->keyId(),
+            $point->publicKeyPem(),
+            $environment,
+            $receipt,
+            $authData->extensions->validationCategory,
+            $authData->extensions->bundleVersion,
+        );
+    }
+
+    /**
+     * @throws AttestationException if the launch values do not pass the policy
+     */
+    private static function enforce(LaunchPolicy $launchPolicy, Extensions $extensions): void
+    {
+        if (!$launchPolicy->allowsValidationCategory($extensions->validationCategory)) {
+            throw new AttestationException(AttestationFailureReason::ValidationCategory, 'The authenticator data carries no validation category the launch policy allows.');
+        }
+
+        if (!$launchPolicy->acceptsBundleVersion($extensions->bundleVersion)) {
+            throw new AttestationException(AttestationFailureReason::BundleVersion, 'The authenticator data carries no bundle version the launch policy accepts.');
+        }
     }
 
     /**
