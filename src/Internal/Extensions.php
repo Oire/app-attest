@@ -47,7 +47,7 @@ final readonly class Extensions
     /**
      * @psalm-pure
      */
-    public static function none(): self
+    private static function none(): self
     {
         return new self(null, null);
     }

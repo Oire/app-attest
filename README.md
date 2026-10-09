@@ -118,7 +118,8 @@ try {
 performs Apple's attestation steps in order:
 
 1. The document is at most 16384 bytes, an `apple-appattest` object with `attStmt.x5c`, `attStmt.receipt`
-   and `authData`, and `authData` is long enough for its layout.
+   and `authData`, and `authData` is long enough for its layout, with one CBOR map, the COSE key, as the
+   credential public key after the `credentialId`.
 2. `x5c` holds exactly two certificates, the credential certificate and an intermediate. The intermediate
    is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, and all
    three are valid at the clock's time.
@@ -170,7 +171,7 @@ $clientData = sodium_base642bin($request['clientData'], SODIUM_BASE64_VARIANT_UR
 $stored = $keys->find($request['keyId']);
 
 try {
-    $counter = (new AssertionVerifier())->verify($assertion, $clientData, $stored->publicKeyPem, $stored->counter, $app);
+    $result = (new AssertionVerifier())->verify($assertion, $clientData, $stored->publicKeyPem, $stored->counter, $app);
 } catch (AssertionException $e) {
     $logger->notice('App Attest assertion refused', ['reason' => $e->reason->name, 'message' => $e->getMessage()]);
 
@@ -178,11 +179,11 @@ try {
 }
 
 // Now check that the challenge inside $clientData is one you issued, consume it,
-// and store $counter for the key atomically (see What You Must Do Yourself)
+// and store $result->counter for the key atomically (see What You Must Do Yourself)
 ```
 
-`verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
-performs Apple's assertion steps 1 to 5 and returns the new counter:
+`verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): VerifiedAssertion`
+performs Apple's assertion steps 1 to 5 and returns a `VerifiedAssertion`:
 
 1. The document is at most 4096 bytes, an object with a `signature` and an `authenticatorData` of at least
    37 bytes.
@@ -203,6 +204,18 @@ after its attestation.
 
 `AssertionVerifier` has no constructor arguments: an assertion carries no certificate and no time.
 
+The returned `Oire\AppAttest\Value\VerifiedAssertion` is a readonly value object:
+
+* `int $counter` — the new counter, to store for the key.
+* `?int $validationCategory` — the raw launch validation category in `authenticatorData`, or null if the
+  device sent none; kept as a number, so one Apple has not named yet is still reported.
+* `?string $bundleVersion` — the app's bundle version in `authenticatorData`, or null if the device sent
+  none.
+* `validationCategory(): ?ValidationCategory` — the category as an enum case, or null if it is absent or a
+  number with no case.
+
+Without a `LaunchPolicy` the launch values are only reported; with one, they have passed it.
+
 ## Launch Category and Bundle Version
 
 Apple's list of attestation steps ends with "Verify the `apple_validation_category_01` value" and "Verify
@@ -218,15 +231,16 @@ versions append this map to `authData` after the credential public key, and to a
 
 Apple names no value you must accept and says nothing of a device that sends neither, and older devices
 do send neither: none of the iOS 14 vectors this library is tested with carries them. So the library
-reports the values of an attestation on `AttestedKey` and enforces them only when you ask. Without a
+reports the values on `AttestedKey` and `VerifiedAssertion` and enforces them only when you ask. Without a
 policy, nothing about them is checked, and an extensions area that is missing or malformed is ignored.
 
 `Oire\AppAttest\Value\ValidationCategory` is an int-backed enum: `Platform` (1, an operating system
 executable), `TestFlight` (2), `Development` (3, signed by a development identity), `AppStore` (4),
 `Enterprise` (5, an enterprise provisioning profile or ad hoc distribution), `DeveloperId` (6) and `None`
 (10, a signing identity that matches no other category). Apple keeps 7 to 9 for binaries the system
-generates in restricted situations and names none of them, so they have no case: `AttestedKey` still
-reports such a number in `$validationCategory`, and no policy allows it.
+generates in restricted situations and names none of them, so they have no case: `AttestedKey` and
+`VerifiedAssertion` still report such a number in `$validationCategory`, and no policy allows it.
+`ValidationCategory::tryFromRaw(?int $value)` gives the case for a reported number, or null.
 
 Pass a `LaunchPolicy` as the last argument of `AttestationVerifier::verify()` to enforce them:
 
@@ -240,12 +254,12 @@ $policy = LaunchPolicy::allowing(ValidationCategory::AppStore, ValidationCategor
 $key = $verifier->verify($attestation, $clientDataHash, $keyId, $app, [Environment::Production], $policy);
 ```
 
-`AssertionVerifier::verify()` takes a policy the same way, but think twice before you pass one. It returns
-only the counter, so you cannot see what an assertion carries without enforcing it, and no genuine
+`AssertionVerifier::verify()` takes a policy the same way, but think twice before you pass one: no genuine
 assertion with these values has been published to test against (see below). If a device puts them in its
 attestation but not in its assertions, or spells them otherwise, every later assertion from it fails with
 `ValidationCategory` or `BundleVersion`. Enforcing the policy once, on the attestation, does not have
-this risk.
+this risk; to see what assertions carry first, verify them without a policy and read the values on the
+`VerifiedAssertion`.
 
 * `LaunchPolicy::allowing(ValidationCategory ...$categories)` allows these categories and leaves the
   bundle version unchecked. It needs at least one category: called with none, for example with an empty
@@ -275,7 +289,7 @@ Apple's own attestation sample carries category 1 and bundle version `"1"`, and 
 No genuine assertion sample with these values exists, so the assertion side is tested only with
 assertions the test builders sign, and with Apple's iOS 14 assertions, which carry none. Before you
 enforce a policy in production, check what your own users' devices send: verify without a policy for a
-while and look at `AttestedKey::$validationCategory` and `$bundleVersion`. `version_compare()`, as in the
+while and look at `$validationCategory` and `$bundleVersion` on `AttestedKey` and `VerifiedAssertion`. `version_compare()`, as in the
 example, treats `"1"` as lower than `"1.0"`, so compare versions the way your app numbers them.
 
 ## Failures
@@ -298,8 +312,8 @@ log. Do not send them to the client: refuse with a generic answer.
 `Oire\AppAttest\Exception\AttestationFailureReason`:
 
 * `Format` — the document is longer than 16384 bytes (Apple's are about 6 KB) or not a well-formed
-  `apple-appattest` object, `authData` is too short, or the credential certificate does not hold an
-  uncompressed P-256 key. The document must be one CBOR map with nothing after it, the keys of every map
+  `apple-appattest` object, `authData` is too short or its credential public key is not one CBOR map, or
+  the credential certificate does not hold an uncompressed P-256 key. The document must be one CBOR map with nothing after it, the keys of every map
   in it distinct text strings, `x5c` an array, `fmt` a text string, and `x5c`'s entries, `receipt` and
   `authData` byte strings.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
@@ -366,8 +380,8 @@ The library verifies; everything around verification is yours:
   never parses `clientData`, so it cannot tell a fresh request from an old one replayed with its original
   assertion; only your challenge check can.
 * **Update the counter atomically.** Two concurrent requests can carry two valid assertions with the same
-  previous counter; both verify, and only one may pass. Store the new counter with a compare-and-set and
-  refuse the request if no row changed:
+  previous counter; both verify, and only one may pass. Store the new counter, `$result->counter`, with a
+  compare-and-set and refuse the request if no row changed:
 
   ```sql
   UPDATE app_attest_keys
@@ -466,7 +480,7 @@ $assertion = (string) MapObject::create()
     ->add(TextStringObject::create('signature'), ByteStringObject::create($signature))
     ->add(TextStringObject::create('authenticatorData'), ByteStringObject::create($authenticatorData));
 
-$counter = (new AssertionVerifier())->verify($assertion, $clientData, $publicKeyPem, $previousCounter, $app); // 1
+$result = (new AssertionVerifier())->verify($assertion, $clientData, $publicKeyPem, $previousCounter, $app); // $result->counter is 1
 ```
 
 A signature over the bare `authenticatorData` followed by the SHA-256 of `clientData`, without hashing
@@ -487,7 +501,7 @@ test code is not part of the Composer package.
 * `AttestationVerifier::__construct(?TrustAnchor $root = null, ?ClockInterface $clock = null)`
 * `AttestationVerifier::verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey`,
   where `$allowed` is a non-empty list of `Environment` cases
-* `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
+* `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): VerifiedAssertion`
 * `TrustAnchor::apple(): TrustAnchor` and `TrustAnchor::fromPem(string $pem): TrustAnchor`
 * `TrustAnchor::APPLE_ROOT_SHA256`, the pinned fingerprint as lowercase hexadecimal, and
   `TrustAnchor::$pem`, the root certificate as PEM
@@ -503,8 +517,11 @@ test code is not part of the Composer package.
   (`'development'`), `aaguid(): string` and `Environment::tryFromAaguid(string $aaguid): ?Environment`
 * `AttestedKey::__construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt, ?int $validationCategory = null, ?string $bundleVersion = null)`,
   described under Registering a Key
+* `VerifiedAssertion::__construct(int $counter, ?int $validationCategory = null, ?string $bundleVersion = null)`,
+  described under Verifying a Request
 * `ValidationCategory`, an int-backed enum: `Platform` (1), `TestFlight` (2), `Development` (3),
-  `AppStore` (4), `Enterprise` (5), `DeveloperId` (6) and `None` (10)
+  `AppStore` (4), `Enterprise` (5), `DeveloperId` (6) and `None` (10), with
+  `ValidationCategory::tryFromRaw(?int $value): ?ValidationCategory`
 * `LaunchPolicy::__construct(array $validationCategories = [], ?Closure $acceptsBundleVersion = null)`, with
   `public readonly array $validationCategories` (a list of `ValidationCategory` cases),
   `public readonly ?Closure $acceptsBundleVersion`, `LaunchPolicy::allowing(ValidationCategory ...$categories): LaunchPolicy`,

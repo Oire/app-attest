@@ -36,10 +36,10 @@ Psalm is pinned to `dev-master` and `config.platform.php` is 8.3.16, so CI and c
 ```text
 src/
   AttestationVerifier.php   # Apple's attestation steps, returns AttestedKey
-  AssertionVerifier.php     # Apple's assertion steps 1-5 (7-8 with a LaunchPolicy), returns the new counter
+  AssertionVerifier.php     # Apple's assertion steps 1-5 (7-8 with a LaunchPolicy), returns a VerifiedAssertion
   TrustAnchor.php           # Bundled Apple root, pinned SHA-256 checked on every load; fromPem() for tests
   SystemClock.php           # Default PSR-20 clock
-  Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey, ValidationCategory, LaunchPolicy
+  Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey, VerifiedAssertion, ValidationCategory, LaunchPolicy
   Exception/                # AppAttestException (abstract), Attestation/AssertionException + reason enums
   Internal/                 # @internal: Cbor, CborStream, CborText, CborMap, AuthenticatorData, Extensions,
                             # CertificateChain, Der, EcPoint, NonceExtension, Pem, ErrorGuard
@@ -122,9 +122,12 @@ tests/
 - `apple_validation_category_01` and `apple_bundle_version_01` (`validationCategory` and `bundleVersion` in
   assertions) are entries of the `extensions` CBOR map in the authenticator data, after the COSE key, not
   certificate extensions. Only Apple's guide sample carries them (the category as four little-endian
-  bytes), so they are reported and enforced only with a `LaunchPolicy`; a missing or malformed extensions
-  area is never a failure without one. `Cbor::tryItemLength()` skips the COSE key; `Cbor::tryDecodeMap()`
-  reads the area after it, strict about the top-level keys and lenient about nested maps.
+  bytes), so both verifiers always report them (`AttestedKey`, `VerifiedAssertion`) and enforce them only
+  with a `LaunchPolicy`; a missing or malformed extensions area is never a failure without one.
+  `Cbor::tryMapLength()` skips the COSE key, which must be one CBOR map or the attestation is `Format`
+  (it is not matched against the certificate's key: the nonce already binds `authData` to Apple's
+  signature); `Cbor::tryDecodeMap()` reads the area after it, strict about the top-level keys and lenient
+  about nested maps.
 - Only a single uncompressed P-256 `PUBLIC KEY` PEM is accepted by `AssertionVerifier`, decoded by the
   library itself, so OpenSSL never reads a file path.
 - Before a release, re-fetch Apple's root and compare its fingerprint with `TrustAnchor::APPLE_ROOT_SHA256`.

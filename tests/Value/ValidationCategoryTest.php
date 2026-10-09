@@ -40,6 +40,14 @@ final class ValidationCategoryTest extends TestCase
     {
         foreach ([0, 7, 8, 9, 11] as $number) {
             self::assertNull(ValidationCategory::tryFrom($number));
+            self::assertNull(ValidationCategory::tryFromRaw($number));
         }
+    }
+
+    public function testRawValueNamesItsCategoryAndAbsenceNamesNone(): void
+    {
+        self::assertSame(ValidationCategory::AppStore, ValidationCategory::tryFromRaw(4));
+        self::assertSame(ValidationCategory::None, ValidationCategory::tryFromRaw(10));
+        self::assertNull(ValidationCategory::tryFromRaw(null));
     }
 }

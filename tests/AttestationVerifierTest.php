@@ -409,6 +409,71 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation));
     }
 
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideCredentialPublicKeysThatAreNotMaps(): iterable
+    {
+        yield 'not CBOR' => ["\x1f\x1f\x1f\x1f"];
+        yield 'a break byte' => ["\xff"];
+        yield 'a list' => [(string) ListObject::create([ByteStringObject::create(EcKey::generate()->point)])];
+        yield 'a byte string' => [(string) ByteStringObject::create(EcKey::generate()->point)];
+        yield 'a text string' => [(string) TextStringObject::create('cose')];
+        yield 'an integer' => [(string) UnsignedIntegerObject::create(2)];
+        yield 'a tagged map' => [(string) Tagged::of(MapObject::create()->add(UnsignedIntegerObject::create(1), UnsignedIntegerObject::create(2)))];
+    }
+
+    #[DataProvider('provideCredentialPublicKeysThatAreNotMaps')]
+    public function testCredentialPublicKeyThatIsNotACborMapIsMalformed(string $coseKey): void
+    {
+        $alone = AttestationBuilder::create()
+            ->withCoseKey($coseKey)
+            ->build();
+        $beforeExtensions = AttestationBuilder::create()
+            ->withCoseKey($coseKey)
+            ->withExtensions(ExtensionsMap::apple(4, '1.0'))
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($alone));
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($beforeExtensions));
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideCoseKeyTruncations(): iterable
+    {
+        yield 'only the map header' => [1];
+        yield 'within the x coordinate' => [20];
+        yield 'one byte short' => [-1];
+    }
+
+    #[DataProvider('provideCoseKeyTruncations')]
+    public function testTruncatedCredentialPublicKeyIsMalformed(int $length): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withCoseKey(mb_substr(AttestationBuilder::coseKey(EcKey::generate()), 0, $length, '8bit'))
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation));
+    }
+
+    public function testCredentialPublicKeyMapIsNotMatchedAgainstTheCertificate(): void
+    {
+        $otherKey = AttestationBuilder::create()
+            ->withCoseKey(AttestationBuilder::coseKey(EcKey::generate()))
+            ->withExtensions(ExtensionsMap::apple(4, '1.0'))
+            ->build();
+        $indefiniteEmptyMap = AttestationBuilder::create()
+            ->withCoseKey((string) IndefiniteLengthMapObject::create())
+            ->build();
+
+        self::assertSame(4, self::verifyBuilt($otherKey)->validationCategory);
+        self::assertSame($indefiniteEmptyMap->keyId, self::verifyBuilt($indefiniteEmptyMap)->keyId);
+    }
+
     public function testWrongFormatIsMalformed(): void
     {
         $attestation = AttestationBuilder::create()

@@ -39,6 +39,7 @@ use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\LaunchPolicy;
 use Oire\AppAttest\Value\TeamId;
 use Oire\AppAttest\Value\ValidationCategory;
+use Oire\AppAttest\Value\VerifiedAssertion;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -80,7 +81,17 @@ final class AssertionVerifierTest extends TestCase
     #[DataProvider('provideGenuineVectors')]
     public function testGenuineVectorIsAcceptedWithItsCounter(AssertionVector $vector): void
     {
-        self::assertSame($vector->expectedCounter, self::verifyVector($vector));
+        self::assertSame($vector->expectedCounter, self::verifyVector($vector)->counter);
+    }
+
+    #[DataProvider('provideGenuineVectors')]
+    public function testGenuineVectorReportsNoLaunchValues(AssertionVector $vector): void
+    {
+        $verified = self::verifyVector($vector);
+
+        self::assertNull($verified->validationCategory);
+        self::assertNull($verified->validationCategory());
+        self::assertNull($verified->bundleVersion);
     }
 
     #[DataProvider('provideGenuineVectors')]
@@ -118,22 +129,22 @@ final class AssertionVerifierTest extends TestCase
         $attested = Fixtures::attestation($vector->attestation);
 
         self::assertSame($vector->keyId, $attested->keyId);
-        self::assertSame($vector->expectedCounter, self::verifyVector($vector, publicKeyPem: $attested->expectedPublicKeyPem));
+        self::assertSame($vector->expectedCounter, self::verifyVector($vector, publicKeyPem: $attested->expectedPublicKeyPem)->counter);
     }
 
     public function testBuiltAssertionIsAccepted(): void
     {
         $builder = AssertionBuilder::create()->withCounter(5);
 
-        self::assertSame(5, self::verifyBuilt($builder, previousCounter: 0));
-        self::assertSame(5, self::verifyBuilt($builder, previousCounter: 4));
+        self::assertSame(5, self::verifyBuilt($builder, previousCounter: 0)->counter);
+        self::assertSame(5, self::verifyBuilt($builder, previousCounter: 4)->counter);
     }
 
     public function testTheLargestCounterIsAccepted(): void
     {
         $builder = AssertionBuilder::create()->withCounter(self::MAX_COUNTER);
 
-        self::assertSame(self::MAX_COUNTER, self::verifyBuilt($builder, previousCounter: self::MAX_COUNTER - 1));
+        self::assertSame(self::MAX_COUNTER, self::verifyBuilt($builder, previousCounter: self::MAX_COUNTER - 1)->counter);
     }
 
     public function testBuiltAssertionWithAnEqualOrLowerCounterFails(): void
@@ -219,7 +230,7 @@ final class AssertionVerifierTest extends TestCase
         $parts = self::partsOf($builder->build(self::CLIENT_DATA));
         $cbor = self::assertionObject(ByteStringObject::create($parts->signature), ByteStringObject::create($parts->authenticatorData));
 
-        self::assertSame(1, self::verifyBuilt($builder, cbor: $cbor));
+        self::assertSame(1, self::verifyBuilt($builder, cbor: $cbor)->counter);
     }
 
     /**
@@ -290,7 +301,7 @@ final class AssertionVerifierTest extends TestCase
         $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of(['padding' => ExtensionsMap::text(str_repeat('a', 3800))]));
 
         self::assertLessThanOrEqual(self::MAX_LENGTH, mb_strlen($builder->build(self::CLIENT_DATA), '8bit'));
-        self::assertSame(1, self::verifyBuilt($builder));
+        self::assertSame(1, self::verifyBuilt($builder)->counter);
     }
 
     public function testAssertionOverTheSizeLimitIsMalformed(): void
@@ -385,8 +396,8 @@ final class AssertionVerifierTest extends TestCase
         $builder = AssertionBuilder::create();
         $parts = self::partsOf($builder->build(self::CLIENT_DATA));
 
-        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts)));
-        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts, TextStringObject::create('extra'), ByteStringObject::create('value'))));
+        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts))->counter);
+        self::assertSame(1, self::verifyBuilt($builder, cbor: self::assertionObjectAdding($parts, TextStringObject::create('extra'), ByteStringObject::create('value')))->counter);
     }
 
     /**
@@ -437,7 +448,7 @@ final class AssertionVerifierTest extends TestCase
             ->add(IndefiniteLengthTextStringObject::create('sig', 'nature'), IndefiniteLengthByteStringObject::create(...mb_str_split($parts->signature, 16, '8bit')))
             ->add(TextStringObject::create('authenticatorData'), IndefiniteLengthByteStringObject::create(...mb_str_split($parts->authenticatorData, 16, '8bit')));
 
-        self::assertSame(1, self::verifyBuilt($builder, cbor: $cbor));
+        self::assertSame(1, self::verifyBuilt($builder, cbor: $cbor)->counter);
     }
 
     /**
@@ -474,7 +485,7 @@ final class AssertionVerifierTest extends TestCase
     {
         $builder = AssertionBuilder::create();
 
-        self::assertSame(1, self::verifyBuilt($builder, publicKeyPem: str_replace("\n", "\r\n", $builder->publicKeyPem())));
+        self::assertSame(1, self::verifyBuilt($builder, publicKeyPem: str_replace("\n", "\r\n", $builder->publicKeyPem()))->counter);
     }
 
     /**
@@ -514,7 +525,7 @@ final class AssertionVerifierTest extends TestCase
     #[DataProvider('provideGenuineVectors')]
     public function testGenuineVectorWithoutLaunchValuesFailsOnlyAPolicyThatNeedsThem(AssertionVector $vector): void
     {
-        self::assertSame($vector->expectedCounter, self::verifyVector($vector, launchPolicy: new LaunchPolicy()));
+        self::assertSame($vector->expectedCounter, self::verifyVector($vector, launchPolicy: new LaunchPolicy())->counter);
         self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyVector($vector, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
         self::assertFailure(
             AssertionFailureReason::BundleVersion,
@@ -548,15 +559,23 @@ final class AssertionVerifierTest extends TestCase
     }
 
     #[DataProvider('provideLaunchValueEncodings')]
-    public function testBuiltLaunchValuesAreEnforced(string $extensions): void
+    public function testBuiltLaunchValuesAreReportedAndEnforced(string $extensions): void
     {
         $builder = AssertionBuilder::create()
             ->withCounter(3)
             ->withExtensions($extensions);
         $passing = LaunchPolicy::allowing(ValidationCategory::TestFlight)->withBundleVersion(static fn(string $version): bool => $version === '4.2');
 
-        self::assertSame(3, self::verifyBuilt($builder));
-        self::assertSame(3, self::verifyBuilt($builder, launchPolicy: $passing));
+        $reported = self::verifyBuilt($builder);
+        $enforced = self::verifyBuilt($builder, launchPolicy: $passing);
+
+        foreach ([$reported, $enforced] as $verified) {
+            self::assertSame(3, $verified->counter);
+            self::assertSame(2, $verified->validationCategory);
+            self::assertSame(ValidationCategory::TestFlight, $verified->validationCategory());
+            self::assertSame('4.2', $verified->bundleVersion);
+        }
+
         self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
         self::assertFailure(
             AssertionFailureReason::BundleVersion,
@@ -569,7 +588,11 @@ final class AssertionVerifierTest extends TestCase
         foreach ([0, 7, 8, 9, 11, self::MAX_UINT32] as $category) {
             $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger($category)]));
 
-            self::assertSame(1, self::verifyBuilt($builder));
+            $verified = self::verifyBuilt($builder);
+
+            self::assertSame(1, $verified->counter);
+            self::assertSame($category, $verified->validationCategory);
+            self::assertNull($verified->validationCategory());
             self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
         }
     }
@@ -600,8 +623,11 @@ final class AssertionVerifierTest extends TestCase
     public function testExtensionsWithoutUsableValuesFailOnlyAPolicy(string $extensions): void
     {
         $builder = AssertionBuilder::create()->withExtensions($extensions);
+        $verified = self::verifyBuilt($builder);
 
-        self::assertSame(1, self::verifyBuilt($builder));
+        self::assertSame(1, $verified->counter);
+        self::assertNull($verified->validationCategory);
+        self::assertNull($verified->bundleVersion);
         self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($builder, launchPolicy: LaunchPolicy::allowing(...ValidationCategory::cases())));
         self::assertFailure(
             AssertionFailureReason::BundleVersion,
@@ -615,9 +641,9 @@ final class AssertionVerifierTest extends TestCase
         $categoryOnly = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(4)]));
         $versionFive = (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version === '5');
 
-        self::assertSame(1, self::verifyBuilt($versionOnly, launchPolicy: $versionFive));
+        self::assertSame(1, self::verifyBuilt($versionOnly, launchPolicy: $versionFive)->counter);
         self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($versionOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
-        self::assertSame(1, self::verifyBuilt($categoryOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
+        self::assertSame(1, self::verifyBuilt($categoryOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore))->counter);
         self::assertFailure(AssertionFailureReason::BundleVersion, static fn() => self::verifyBuilt($categoryOnly, launchPolicy: $versionFive));
     }
 
@@ -640,7 +666,7 @@ final class AssertionVerifierTest extends TestCase
         foreach (Damage::of(ExtensionsMap::apple(2, '4.2'), [0x01, 0x80, 0xFF]) as $damaged) {
             $builder = AssertionBuilder::create()->withExtensions($damaged->bytes);
 
-            self::assertSame(1, Damage::withoutPhpErrors(static fn(): int => self::verifyBuilt($builder)), 'Damage at extensions byte ' . $damaged->offset . '.');
+            self::assertSame(1, Damage::withoutPhpErrors(static fn(): int => self::verifyBuilt($builder)->counter), 'Damage at extensions byte ' . $damaged->offset . '.');
         }
     }
 
@@ -652,7 +678,7 @@ final class AssertionVerifierTest extends TestCase
         ?AppIdentity $app = null,
         ?string $cbor = null,
         ?LaunchPolicy $launchPolicy = null,
-    ): int {
+    ): VerifiedAssertion {
         return (new AssertionVerifier())->verify(
             $cbor ?? $vector->bytes,
             $clientData ?? $vector->clientData,
@@ -669,7 +695,7 @@ final class AssertionVerifierTest extends TestCase
         ?string $publicKeyPem = null,
         ?string $cbor = null,
         ?LaunchPolicy $launchPolicy = null,
-    ): int {
+    ): VerifiedAssertion {
         return (new AssertionVerifier())->verify(
             $cbor ?? $builder->build(self::CLIENT_DATA),
             self::CLIENT_DATA,

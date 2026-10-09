@@ -98,7 +98,7 @@ final readonly class LaunchPolicy
             return true;
         }
 
-        $known = $category === null ? null : ValidationCategory::tryFrom($category);
+        $known = ValidationCategory::tryFromRaw($category);
 
         return $known !== null && in_array($known, $this->validationCategories, true);
     }

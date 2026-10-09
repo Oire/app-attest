@@ -96,7 +96,7 @@ final readonly class AttestationVerifier
         }
 
         $authData = AuthenticatorData::tryFromAttestation($authDataBytes)
-            ?? throw new AttestationException(AttestationFailureReason::Format, 'The authenticator data is shorter than its layout requires.');
+            ?? throw new AttestationException(AttestationFailureReason::Format, 'The authenticator data is shorter than its layout requires or holds no credential public key map.');
 
         $chain = CertificateChain::tryValidate($certificates, $this->root, $this->clock->now())
             ?? throw new AttestationException(AttestationFailureReason::CertificateChain, 'The certificate chain does not lead to the trust anchor or is not valid at this time.');

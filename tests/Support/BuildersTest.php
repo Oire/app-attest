@@ -144,6 +144,24 @@ final class BuildersTest extends TestCase
         self::assertSame(str_repeat("\xff", 16), mb_substr($unknown->authData, AuthDataLayout::AAGUID_OFFSET, AuthDataLayout::AAGUID_LENGTH, '8bit'));
     }
 
+    public function testCoseKeyFollowsTheCredentialIdAndCanBeReplaced(): void
+    {
+        $plain = AttestationBuilder::create()->build();
+        $coseKeyOffset = AuthDataLayout::CREDENTIAL_ID_OFFSET + mb_strlen($plain->keyId, '8bit');
+        $coseKey = self::decode(mb_substr($plain->authData, $coseKeyOffset, null, '8bit'));
+        $point = self::pointOfPem($plain->publicKeyPem);
+        $replaced = AttestationBuilder::create()
+            ->withCoseKey('not a key')
+            ->build();
+
+        self::assertSame([1 => '2', 3 => '-7', -1 => '1', -2 => mb_substr($point, 1, 32, '8bit'), -3 => mb_substr($point, 33, 32, '8bit')], $coseKey);
+        self::assertSame('not a key', mb_substr($replaced->authData, $coseKeyOffset, null, '8bit'));
+        self::assertSame(
+            AttestationBuilder::nonceExtensionDer(hash('sha256', $replaced->authData . $replaced->clientDataHash, true)),
+            self::nonceExtensionOf($replaced->credentialDer),
+        );
+    }
+
     public function testExtensionsFollowTheCredentialPublicKey(): void
     {
         $extensions = ExtensionsMap::apple(4, '2.1');

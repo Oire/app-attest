@@ -25,9 +25,10 @@ use LogicException;
 
 /**
  * Authenticator data: rpIdHash (32 bytes), flags (1), signCount (4, big-endian), then, in an attestation
- * only, aaguid (16), credentialId length (2, big-endian), credentialId and the credential public key as one
- * CBOR item. What follows, after the public key in an attestation and after the counter in an assertion, is
- * read as the extensions map whatever the flags say; bytes that are not one well-formed map are ignored.
+ * only, aaguid (16), credentialId length (2, big-endian), credentialId and the credential public key, a COSE
+ * key that must be one CBOR map. What follows, after the public key in an attestation and after the counter
+ * in an assertion, is read as the extensions map whatever the flags say; bytes that are not one well-formed
+ * map are ignored.
  *
  * @internal
  */
@@ -60,7 +61,8 @@ final readonly class AuthenticatorData
     ) {}
 
     /**
-     * The parsed data, or null if the bytes are shorter than the layout requires.
+     * The parsed data, or null if the bytes are shorter than the layout requires or no CBOR map follows the
+     * credentialId as the credential public key.
      */
     public static function tryFromAttestation(string $bytes): ?self
     {
@@ -77,16 +79,18 @@ final readonly class AuthenticatorData
         }
 
         $publicKeyAndExtensions = mb_substr($bytes, self::CREDENTIAL_ID_OFFSET + $credentialIdLength, null, '8bit');
-        $publicKeyLength = Cbor::tryItemLength($publicKeyAndExtensions);
+        $publicKeyLength = Cbor::tryMapLength($publicKeyAndExtensions);
+
+        if ($publicKeyLength === null) {
+            return null;
+        }
 
         return new self(
             self::rpIdHashOf($bytes),
             self::counterOf($bytes),
             mb_substr($bytes, self::AAGUID_OFFSET, self::AAGUID_LENGTH, '8bit'),
             mb_substr($bytes, self::CREDENTIAL_ID_OFFSET, $credentialIdLength, '8bit'),
-            $publicKeyLength === null
-                ? Extensions::none()
-                : Extensions::fromArea(mb_substr($publicKeyAndExtensions, $publicKeyLength, null, '8bit')),
+            Extensions::fromArea(mb_substr($publicKeyAndExtensions, $publicKeyLength, null, '8bit')),
         );
     }
 

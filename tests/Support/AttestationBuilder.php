@@ -65,6 +65,7 @@ final class AttestationBuilder
     private bool $rootExpired = false;
     private ?string $unlistedIssuerUrl = null;
     private string $extensions = '';
+    private ?string $coseKey = null;
 
     private function __construct()
     {
@@ -237,6 +238,17 @@ final class AttestationBuilder
     }
 
     /**
+     * Bytes in authData in place of the COSE key the builder encodes for the credential public key.
+     */
+    public function withCoseKey(string $bytes): self
+    {
+        $builder = clone $this;
+        $builder->coseKey = $bytes;
+
+        return $builder;
+    }
+
+    /**
      * Bytes after the credential public key in authData, such as an extensions map (ExtensionsMap).
      */
     public function withExtensions(string $bytes): self
@@ -348,15 +360,22 @@ final class AttestationBuilder
         );
     }
 
-    private function authData(string $keyId, EcKey $credentialKey): string
+    /**
+     * The COSE key of a P-256 public key as authData carries it: kty EC2, alg ES256, crv P-256, x and y.
+     */
+    public static function coseKey(EcKey $key): string
     {
-        $credentialId = $this->credentialId ?? $keyId;
-        $coseKey = MapObject::create()
+        return (string) MapObject::create()
             ->add(UnsignedIntegerObject::create(1), UnsignedIntegerObject::create(2))
             ->add(UnsignedIntegerObject::create(3), NegativeIntegerObject::create(-7))
             ->add(NegativeIntegerObject::create(-1), UnsignedIntegerObject::create(1))
-            ->add(NegativeIntegerObject::create(-2), ByteStringObject::create($credentialKey->x()))
-            ->add(NegativeIntegerObject::create(-3), ByteStringObject::create($credentialKey->y()));
+            ->add(NegativeIntegerObject::create(-2), ByteStringObject::create($key->x()))
+            ->add(NegativeIntegerObject::create(-3), ByteStringObject::create($key->y()));
+    }
+
+    private function authData(string $keyId, EcKey $credentialKey): string
+    {
+        $credentialId = $this->credentialId ?? $keyId;
 
         return $this->app->rpIdHash()
             . chr(self::FLAGS)
@@ -364,7 +383,7 @@ final class AttestationBuilder
             . $this->aaguid
             . pack('n', mb_strlen($credentialId, '8bit'))
             . $credentialId
-            . (string) $coseKey
+            . ($this->coseKey ?? self::coseKey($credentialKey))
             . $this->extensions;
     }
 

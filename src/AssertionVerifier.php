@@ -14,6 +14,7 @@ use Oire\AppAttest\Internal\Extensions;
 use Oire\AppAttest\Internal\Pem;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\LaunchPolicy;
+use Oire\AppAttest\Value\VerifiedAssertion;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -53,9 +54,9 @@ final readonly class AssertionVerifier
      *                                  counter is outside 0..2^32−1
      * @throws AssertionException       if the assertion fails a check; its reason names the check
      *
-     * @return int the new counter, to store for the key
+     * @return VerifiedAssertion the new counter, to store for the key, and the launch values the assertion reports
      */
-    public function verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int
+    public function verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): VerifiedAssertion
     {
         $point = self::pointOf($publicKeyPem)
             ?? throw new InvalidArgumentException('The public key must be a PEM-encoded uncompressed P-256 public key.');
@@ -98,7 +99,11 @@ final readonly class AssertionVerifier
             self::enforce($launchPolicy, $authData->extensions);
         }
 
-        return $authData->counter;
+        return new VerifiedAssertion(
+            $authData->counter,
+            $authData->extensions->validationCategory,
+            $authData->extensions->bundleVersion,
+        );
     }
 
     /**

@@ -70,17 +70,17 @@ final class Cbor
     }
 
     /**
-     * The number of bytes the CBOR item at the start of the bytes takes, whatever it holds and whatever follows
-     * it, or null if no item decodes there.
+     * The number of bytes the CBOR map at the start of the bytes takes, whatever its keys and values are and
+     * whatever follows it, or null if what decodes there is not a map, or nothing does.
      */
-    public static function tryItemLength(string $bytes): ?int
+    public static function tryMapLength(string $bytes): ?int
     {
         try {
-            return ErrorGuard::call(static function() use ($bytes): int {
+            return ErrorGuard::call(static function() use ($bytes): ?int {
                 $stream = new CborStream($bytes);
-                Decoder::create()->decode($stream);
+                $object = Decoder::create()->decode($stream);
 
-                return $stream->offset();
+                return $object instanceof MapObject || $object instanceof IndefiniteLengthMapObject ? $stream->offset() : null;
             });
         } catch (Throwable) {
             return null;

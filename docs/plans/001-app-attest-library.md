@@ -25,13 +25,15 @@ to the caller, who passes the stored public key and counter in and stores the ne
 - [x] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
       a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
       each with its own `$reason`
-- [x] ➕ `AttestationVerifier` reports the launch validation category and bundle version from the
-      authenticator data extensions on `AttestedKey`; both verifiers, only with a `LaunchPolicy`, refuse
-      them with `ValidationCategory` and `BundleVersion`; without a policy every earlier result is
-      unchanged (Task 7)
-      ⚠️ `AssertionVerifier` enforces the launch values but does not report them: it still returns only
-      the counter. Whether it should return a result carrying them is open for the maintainer before
-      `v1.0.0` (Post-completion) (review, 2026-10-09)
+      ⚠️ The counter is returned as `VerifiedAssertion::$counter` since the return type changed at the
+      maintainer's request on 2026-10-09 (Task 5)
+- [x] ➕ both verifiers report the launch validation category and bundle version from the authenticator
+      data extensions, `AttestationVerifier` on `AttestedKey` and `AssertionVerifier` on
+      `VerifiedAssertion`; both, only with a `LaunchPolicy`, refuse them with `ValidationCategory` and
+      `BundleVersion`; without a policy they are only reported and every earlier failure is unchanged
+      (Task 7)
+      ⚠️ At first `AssertionVerifier` enforced the values without reporting them (review, 2026-10-09);
+      the maintainer then chose, before `v1.0.0`, that it returns `VerifiedAssertion` (2026-10-09)
 - [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
 - [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
@@ -93,6 +95,8 @@ The repository's `compose.yaml` gives a PHP 8.5 CLI container for machines witho
 - **`authenticatorData` layout** (big-endian): `rpIdHash` 32 bytes | flags 1 | signCount 4 | then, in an
   attestation only, `aaguid` 16 | credentialId length 2 | credentialId | the COSE public key. An
   assertion's is exactly 37 bytes. Anything shorter than its layout requires is `Format`.
+  ⚠️ So is an attestation whose credential public key, after the credentialId, is not one CBOR map
+  (Codex review C3-1, Task 7, 2026-10-09)
   ⚠️ An assertion's `authenticatorData` is at least 37 bytes: newer OS versions append an `extensions`
   CBOR map after them, and after the COSE key in an attestation; Apple's attestation list continues past
   step 9 with the launch category and bundle version checks, and its assertion steps 7 and 8 do the same
@@ -405,6 +409,9 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 - ➕ Create: `tests/Support/AssertionParts.php` (a decoded assertion's two members, for tests that
   reassemble one); Modify: `tests/Support/AssertionBuilder.php`, `tests/Support/BuildersTest.php` (the
   builder signs the nonce) (plan execution, 2026-10-09)
+- ➕ Create: `src/Value/VerifiedAssertion.php`, `tests/Value/VerifiedAssertionTest.php`; Modify:
+  `src/Value/ValidationCategory.php`, `src/Value/AttestedKey.php`, `src/Value/LaunchPolicy.php`,
+  `tests/Value/ValidationCategoryTest.php` (the result object, maintainer's request, 2026-10-09)
 
 #### Steps
 - [x] `verify(assertionCbor, clientData, publicKeyPem, previousCounter, app)`: reject an unparsable PEM or
@@ -428,9 +435,16 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       OpenSSL never reads a file. `authenticatorData` longer than 37 bytes is not refused; only its first
       37 are read (plan execution, 2026-10-09). Since ➕ Task 7 the bytes after the 37 are read as the
       extensions area, and only a policy enforces them.
+      ⚠️ The return type changed at the maintainer's request on 2026-10-09, before `v1.0.0` was tagged:
+      `verify()` returns a `final readonly` `Value\VerifiedAssertion` with `int $counter`, the raw
+      `?int $validationCategory` (an unknown number is still reported), `?string $bundleVersion` and
+      `validationCategory(): ?ValidationCategory`, instead of the bare counter. The raw category is mapped
+      by `ValidationCategory::tryFromRaw()`, which `AttestedKey` and `LaunchPolicy` use as well. With a
+      policy the values are enforced, without one only reported
 - [x] `clientData` is the caller's raw bytes; the library never parses it (what it contains is the
       caller's protocol — Apple's assertion step 6, checking the challenge inside it, is the caller's)
-- [x] tests: every genuine vector accepted with its counter; builder assertions accepted; a flipped
+- [x] tests: every genuine vector accepted with its counter (and, since the result object, with no launch
+      values); builder assertions accepted; a flipped
       signature byte; a foreign key; another bundle; an equal and a lower previous counter; a garbage
       document; an invalid PEM and a negative counter are `InvalidArgumentException`
 - [x] validation commands pass
@@ -507,12 +521,24 @@ request, so every existing call keeps its behavior.
       it took (any content, integer keys included); everything after it is the extensions area, read with
       the strict `Cbor::tryDecodeMap()`, so it yields values only when it is exactly one map with distinct
       text-string keys and nothing after it. After review, a nested map in another entry may have keys of
-      any type (`lenientNestedMaps`): it becomes null instead of hiding the launch values. A COSE key that does not decode yields no values. Both
+      any type (`lenientNestedMaps`): it becomes null instead of hiding the launch values. Both
       verifiers accept both spellings; when both hold a usable value, the `apple_…_01` one wins. The
       decoder now keeps unsigned integers that fit a PHP int, which cannot pass for any document member.
       `AuthenticatorData`, `Extensions` and `LaunchPolicy` are `readonly` but not `@psalm-immutable`: the
       decoder runs under `ErrorGuard` and the bundle version closure is the caller's, both impure
       (plan execution, 2026-10-09)
+      ⚠️ After Codex review C3-1, the credential public key must decode as exactly one CBOR map (a COSE
+      key): `Cbor::tryMapLength()` replaces `Cbor::tryItemLength()`, and a key that is not CBOR, is a
+      list, a byte string or another non-map item, is tagged, or is truncated makes the attestation
+      `Format` instead of being read as "no extensions". All 8 genuine attestations, the Apple guide vector
+      included, carry a definite-length map `{1: 2, 3: -7, -1: 1, -2: x, -3: y}` whose x and y equal the
+      certificate's point. The map is deliberately **not** matched against the certificate's key: Apple's
+      steps do not ask for it, the nonce already binds `authData` to the certificate Apple signed (so only
+      Apple could produce a mismatch), and the check would need a COSE reader for the integer and negative
+      integer keys the strict decoder refuses, plus a failure reason. A damaged key that still decodes as
+      a map, for example one that absorbs the extensions' first bytes, is therefore accepted, its
+      extensions read leniently. The extensions rules after the key are unchanged (Codex review,
+      2026-10-09)
 - [x] values: the category is a `UInt32` given either as a 4-byte little-endian byte string (Apple's
       sample) or as a CBOR unsigned integer; the bundle version is a text string. Anything else counts as
       absent
@@ -546,9 +572,11 @@ request, so every existing call keeps its behavior.
       `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
       `BundleVersion`; both run after every existing check. Add both cases to `AttestationFailureReason`
       and `AssertionFailureReason`
-      ⚠️ Only `AttestationVerifier` reports the values (on `AttestedKey`); `AssertionVerifier::verify()`
-      keeps returning the counter, so on the assertion side the values are enforced but not visible
-      (review, 2026-10-09)
+      ⚠️ At first only `AttestationVerifier` reported the values (on `AttestedKey`), and
+      `AssertionVerifier::verify()` returned the counter, so on the assertion side they were enforced but
+      not visible (review, 2026-10-09). The return type changed at the maintainer's request on
+      2026-10-09: `AssertionVerifier::verify()` returns `VerifiedAssertion`, which reports them like
+      `AttestedKey` (Task 5)
 - [x] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
       into `authData` and `authenticatorData`
 - [x] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
@@ -569,7 +597,8 @@ request, so every existing call keeps its behavior.
 ⚠️ Updated after review to match the code: the classes are `final readonly`, and the sketch now lists the
 members added during implementation (plan execution, 2026-10-09). ➕ Task 7 adds the trailing
 `?LaunchPolicy $launchPolicy` argument, `ValidationCategory`, `LaunchPolicy`, the launch values on
-`AttestedKey` and the `ValidationCategory` and `BundleVersion` reasons.
+`AttestedKey` and the `ValidationCategory` and `BundleVersion` reasons. ⚠️ `AssertionVerifier::verify()`
+returns `VerifiedAssertion` instead of the counter, at the maintainer's request (2026-10-09).
 
 ```php
 namespace Oire\AppAttest;
@@ -587,7 +616,7 @@ final readonly class AssertionVerifier {
     /** @throws InvalidArgumentException  @throws AssertionException */
     public function verify(string $assertionCbor, string $clientData, string $publicKeyPem,
                            int $previousCounter, AppIdentity $app,
-                           ?LaunchPolicy $launchPolicy = null): int; // the new counter
+                           ?LaunchPolicy $launchPolicy = null): VerifiedAssertion;
 }
 
 final readonly class TrustAnchor {
@@ -624,9 +653,16 @@ final readonly class AttestedKey {
     public function validationCategory(): ?ValidationCategory; // null if absent or unnamed
     public function keyIdBase64Url(): string;
 }
+final readonly class VerifiedAssertion {
+    public function __construct(int $counter, ?int $validationCategory = null, ?string $bundleVersion = null);
+    int $counter; // the new counter, to store
+    ?int $validationCategory; ?string $bundleVersion; // null if absent
+    public function validationCategory(): ?ValidationCategory; // null if absent or unnamed
+}
 enum ValidationCategory: int {
     case Platform = 1; case TestFlight = 2; case Development = 3; case AppStore = 4;
     case Enterprise = 5; case DeveloperId = 6; case None = 10; // 7-9: unnamed by Apple, no case
+    public static function tryFromRaw(?int $value): ?self; // null if absent or unnamed
 }
 final readonly class LaunchPolicy {
     /** @param list<ValidationCategory> $validationCategories  @param ?Closure(string): bool $acceptsBundleVersion */
@@ -676,9 +712,6 @@ state: storage, challenges and the counter race are the caller's.
      `gh api repos/Oire/app-attest/hooks -f name=web -f "config[url]=https://packagist.org/api/github?username=<username>" -f "config[content_type]=json" -f "config[secret]=<token>" -F active=true -f "events[]=push"`
   3. Check: the hook's **Recent Deliveries** shows a 2xx response after the next push, and the package
      page on Packagist no longer warns that it is not auto-updated.
-- Before tagging `v1.0.0`, decide whether `AssertionVerifier::verify()` keeps returning the counter
-  (the launch values enforced but never reported) or returns a readonly result with the counter, the
-  validation category and the bundle version; changing it after `v1.0.0` breaks the API.
 - Tell AccessMind the version to require.
 - Before a later release: re-fetch Apple's root and compare its fingerprint with the constant.
 - When PHP 8.3 reaches end of life (2027-12-31): drop it from the CI matrix and raise `"php"` and

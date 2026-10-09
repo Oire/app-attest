@@ -55,4 +55,15 @@ enum ValidationCategory: int
      * An executable signed with an identity that matches no other category.
      */
     case None = 10;
+
+    /**
+     * The category a raw reported value names, or null if the value is absent or a number Apple names no
+     * category for.
+     *
+     * @psalm-pure
+     */
+    public static function tryFromRaw(?int $value): ?self
+    {
+        return $value === null ? null : self::tryFrom($value);
+    }
 }
