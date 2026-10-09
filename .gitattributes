@@ -3,6 +3,9 @@
 
 # Golden vectors stay byte-for-byte as the references ship them
 tests/fixtures/** binary
+# ...except the sidecars and notes written for this repository
+tests/fixtures/*/*.json text eol=lf diff merge
+tests/fixtures/README.md text eol=lf diff merge
 
 # https://php.watch/articles/composer-gitattributes
 # Exclude development files from the Composer archive.

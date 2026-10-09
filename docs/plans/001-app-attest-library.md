@@ -255,19 +255,36 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 - Create: `tests/FixturesTest.php`, `tests/Support/BuildersTest.php`
 
 #### Steps
-- [ ] collect every **genuine** attestation and assertion vector the two references test with, as files,
+- [x] collect every **genuine** attestation and assertion vector the two references test with, as files,
       each with a JSON sidecar naming its inputs, how its `clientDataHash` was formed (SHA-256 of a UTF-8
       challenge string, or a raw value — consumers need to know which), its environment, and the time to
       verify it at. Binary values in the sidecars (key id, `clientDataHash`, expected counter bytes) are
       unpadded base64url, converted from whatever the reference used; the vector files themselves stay
       byte-for-byte as the references ship them. Genuine vectors are used **only unchanged**
-- [ ] `Fixtures` hands each vector's time to the verifier as a Symfony `MockClock`
-- [ ] failure cases that genuine vectors reach through the verifier's inputs are listed, not built
+      ⚠️ The references ship their vectors base64-encoded inside multi-document YAML
+      (`veehaitch`) and a Go string constant (`takimoto3`), not as files of their own: each vector is
+      stored as `<name>.cbor`, the exact decoded bytes, and the reference files are copied byte-for-byte
+      to `tests/fixtures/source/`; `FixturesTest` checks that each `.cbor` file's base64 appears verbatim
+      in its copy. Collected: 8 attestations and 7 assertions. `veehaitch` (commit `cb26211f`) gives 7 of
+      each, all development builds; `takimoto3` (commit `9d7551c0`) adds one attestation, Apple's
+      published validation-guide sample (production, newer extensions); its `testdata/ios-14.4.json`
+      and inline constants hold the same bytes as `veehaitch`'s `ios-14.4` and are not collected twice.
+      The counter is a JSON integer, not bytes (plan execution, 2026-10-09)
+      ⚠️ The Apple-guide vector's nonce is formed from the **raw** 24-byte challenge
+      `example_server_challenge`, not its SHA-256, as Apple's guide shows: Task 4 must not require a
+      32-byte `clientDataHash`. The guide gives no time: `verifyAt` is inferred as one day after the
+      credential certificate's `notBefore`. Its `authData` carries an extensions map after the COSE key
+      although the ED flag is clear, so the parser must not reject trailing bytes (plan execution, 2026-10-09)
+- [x] `Fixtures` hands each vector's time to the verifier as a Symfony `MockClock`
+- [x] failure cases that genuine vectors reach through the verifier's inputs are listed, not built
       (Task 4 uses them): `Nonce` — another `clientDataHash`; `KeyId` — another key id; `RpIdHash` —
       another `AppIdentity`; `Environment` — `allowed` without the vector's environment;
       `CertificateChain` — a clock past the leaf's validity, or another `TrustAnchor`; `Format` —
       garbage, a wrong `fmt`, a missing `x5c`, a truncated `authData`
-- [ ] `AttestationBuilder` (test code, never shipped) makes what genuine vectors cannot: a root, an
+      ⚠️ Only garbage is reachable without re-encoding a genuine vector; the builder makes the wrong
+      `fmt`, missing `x5c` and truncated `authData` (`withFormat`, `withoutCertificates`,
+      `withAuthDataTruncatedTo`). The list lives in `tests/fixtures/README.md` (plan execution, 2026-10-09)
+- [x] `AttestationBuilder` (test code, never shipped) makes what genuine vectors cannot: a root, an
       intermediate CA and a leaf on P-256, signed with phpseclib; the nonce extension on the leaf as DER
       `SEQUENCE { [1] EXPLICIT OCTET STRING }`; `authData` with any `rpIdHash`, counter, `aaguid` and
       `credentialId`; the CBOR document encoded with cbor-php's encoder. Its attestations verify against
@@ -276,13 +293,23 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       accepted and refused (the references' vectors may all be development builds — record in the
       sidecars which they are), a chain whose intermediate is not a CA (`CertificateChain`), and a missing
       nonce extension (`Nonce`)
-- [ ] `AssertionBuilder` (test code) generates a P-256 key and signs `authenticatorData ‖
+      ⚠️ phpseclib does **not** check CA status: `validateSignature()`'s `$caonly` only requires the issuer
+      to be among the loaded CAs, and `loadCA()`'s `basicConstraints` check is commented out. Task 4 must
+      check the intermediate's `basicConstraints` `cA` itself; `BuildersTest` shows a non-CA intermediate
+      still passes `validateSignature()`. phpseclib also fetches `caIssuers` URLs from an
+      `authorityInfoAccess` extension, so Task 4 must call `X509::disableURLFetch()` (no network)
+      ⚠️ The builder writes the nonce extension through `X509::registerExtension()`, which is global:
+      once registered, phpseclib decodes the extension into `['nonce' => …]` for every certificate it
+      loads. Task 4's verifier must register the identical map (move `AttestationBuilder::NONCE_EXTENSION_MAP`
+      to `src/Internal/` and point the builder at it), or it would see a decoded array in tests and a raw
+      string in production (plan execution, 2026-10-09)
+- [x] `AssertionBuilder` (test code) generates a P-256 key and signs `authenticatorData ‖
       SHA-256(clientData)` for any `rpIdHash`, counter and `clientData`, CBOR-encoding
       `{signature, authenticatorData}` — the same recipe consumers use for their own tests
-- [ ] `tests/fixtures/README.md` lists each vector's origin (repository, commit, path) and license
-- [ ] tests: every sidecar parses, its base64url fields decode, and it names an existing file; a builder
+- [x] `tests/fixtures/README.md` lists each vector's origin (repository, commit, path) and license
+- [x] tests: every sidecar parses, its base64url fields decode, and it names an existing file; a builder
       attestation verifies with the builder's root (a smoke check of the builders themselves)
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ### Task 4: `AttestationVerifier`
 

@@ -1,0 +1,28 @@
+{
+    "vector": "takimoto3-apple-guide.cbor",
+    "origin": {
+        "repository": "https://github.com/takimoto3/app-attest",
+        "commit": "9d7551c05804d3e35d5477b5aed1d82d8f8a2035",
+        "path": "apple_guide_test.go",
+        "copy": "source/takimoto3/apple_guide_test.go",
+        "license": "LICENSE-takimoto3",
+        "constant": "appleGuideAttestationObjectBase64",
+        "publishedBy": "https://developer.apple.com/documentation/devicecheck/attestation-object-validation-guide"
+    },
+    "teamId": "1234567890",
+    "bundleId": "com.example.myapp",
+    "keyId": "zgSY9YSD-7TaDXssY6WlOPVS1K3Lmk-pFhlcSWE-ZV0",
+    "clientDataHash": {
+        "formedAs": "raw",
+        "challenge": "example_server_challenge",
+        "value": "ZXhhbXBsZV9zZXJ2ZXJfY2hhbGxlbmdl"
+    },
+    "environment": "production",
+    "verifyAt": "2026-04-21T18:13:12.000Z",
+    "verifyAtSource": "inferred: one day after the credential certificate notBefore (2026-04-20T18:13:12Z, notAfter 2026-04-23T18:13:12Z); the guide gives no time",
+    "expected": {
+        "result": "accepted",
+        "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQzJUSs8yPbd0RDyq8zn1bn6VxyT6\nwsFCWfNl4kRWULK1+yhbz1Sby2BZRBLnaCokJ+6tqftS3+0LGrF+0J+pvQ==\n-----END PUBLIC KEY-----\n",
+        "counter": 0
+    }
+}
