@@ -7,18 +7,30 @@ The library moves to phpseclib 4.
 * **phpseclib 4 is required:** `phpseclib/phpseclib` `^4.0` replaces `^3.0.57`. phpseclib 3 and 4 are the
   same Composer package, so an application that needs phpseclib 3 elsewhere cannot install this version
   and should stay on 1.0 until it moves to phpseclib 4. The library's own API is unchanged.
-* **No process-wide phpseclib settings are changed.** phpseclib 4's `X509::validateSignature()` trusts a
-  process-wide CA store, checks a process-wide validation date, calls the CRL callback and resolves
-  `caIssuers` host names before it asks the URL-fetch callback, so `AttestationVerifier` no longer calls
-  it. It checks each link of the chain itself: the issuer's ECDSA signature over the certificate's
-  original `tbsCertificate` bytes, phpseclib's issuer matching, the validity period and, as before, the
-  intermediate's `basicConstraints` `cA` flag. It no longer calls `X509::disableURLFetch()`, which
-  phpseclib 4 removed, and no longer registers the nonce extension with `X509::registerExtension()`: it
-  decodes the extension itself. Another map registered for the nonce extension is still a
-  `LogicException`.
+* **The library sets none of phpseclib's process-wide `X509` settings.** phpseclib 4's
+  `X509::validateSignature()` trusts a process-wide CA store, checks a process-wide validation date, calls
+  the CRL callback and resolves `caIssuers` host names before it asks the URL-fetch callback, so
+  `AttestationVerifier` no longer calls it. It checks each link of the chain itself, the signature first:
+  the issuer's ECDSA signature over the certificate's original `tbsCertificate` bytes, verified with
+  OpenSSL before phpseclib parses the certificate, then phpseclib's issuer matching, the validity period
+  and, as before, the intermediate's `basicConstraints` `cA` flag. It no longer calls
+  `X509::disableURLFetch()`, which phpseclib 4 removed, and no longer registers the nonce extension with
+  `X509::registerExtension()`: it decodes the extension itself. Any map registered for the nonce extension,
+  under its OID or a name given to it with `ASN1::loadOIDs()`, is a `LogicException`. phpseclib itself
+  still turns ASN.1 cache invalidation back on whenever it decodes a certificate's extensions.
+* Applications that called `X509::enableURLFetch()` after each verification, as the 1.0 README advised,
+  should drop that call: phpseclib 4 has no such method, and the library no longer changes URL fetching.
+  phpseclib also no longer decodes the nonce extension of certificates your own code loads after a
+  verification, since the library registers no map for it.
 * Certificates in the chain must be signed with ECDSA over SHA-256, SHA-384 or SHA-512, as Apple's are,
-  and phpseclib 4 requires an issuer's key usage to include `keyCertSign`. This matters only to test chains
-  passed to `TrustAnchor::fromPem()`.
+  and phpseclib 4 requires an issuer to carry a key usage extension that includes `keyCertSign`.
+  `TrustAnchor::fromPem()` now throws an `InvalidArgumentException` for a root without an EC key (Ed25519
+  and Ed448 included) or without `keyCertSign`, instead of accepting a root no chain can lead to. This
+  matters only to test chains passed to `TrustAnchor::fromPem()`.
+* A certificate in the chain must be exactly the DER encoding it was signed as: a signature that is not
+  strict DER, unused bits declared in the signature, a `signatureAlgorithm` with parameters or other than
+  the one inside `tbsCertificate`, or a length in a longer form than needed fails the chain. A credential
+  certificate with the nonce extension twice fails the nonce.
 
 # Version 1.0.0
 

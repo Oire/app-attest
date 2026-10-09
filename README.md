@@ -357,14 +357,15 @@ cannot be mistaken for a forged request:
   `'production'` or `'development'`;
 * a `LaunchPolicy` category list holding anything but `ValidationCategory` cases, and
   `LaunchPolicy::allowing()` called with no category;
-* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate.
+* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate, or whose certificate has no
+  EC key or no key usage that includes `keyCertSign`, so that no chain could lead to it.
 
 A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
 
 * `TrustAnchor::apple()`, which `AttestationVerifier` calls when you pass no trust anchor, throws one if the
   bundled Apple root is missing or does not match its pinned fingerprint;
-* `AttestationVerifier::verify()` throws one if your process has registered another phpseclib ASN.1 map for
-  the nonce extension, OID `1.2.840.113635.100.8.2` (see Using phpseclib Elsewhere in Your Application).
+* `AttestationVerifier::verify()` throws one if your process has registered a phpseclib ASN.1 map for the
+  nonce extension, OID `1.2.840.113635.100.8.2` (see Using phpseclib Elsewhere in Your Application).
 
 ## What You Must Do Yourself
 
@@ -429,29 +430,44 @@ use Oire\AppAttest\TrustAnchor;
 $verifier = new AttestationVerifier(TrustAnchor::fromPem($testRootPem));
 ```
 
-Like Apple's, a test chain must use EC keys, sign with ECDSA over SHA-256, SHA-384 or SHA-512, and give its
-root and intermediate the `keyCertSign` key usage.
+Like Apple's, a test chain must use EC keys (not Ed25519 or Ed448), sign each certificate with ECDSA over
+SHA-256, SHA-384 or SHA-512, give its root and intermediate a key usage extension that includes
+`keyCertSign`, and mark the intermediate as a CA in `basicConstraints`. `TrustAnchor::fromPem()` throws an
+`InvalidArgumentException` for a root without an EC key or without `keyCertSign`; a chain that misses any of
+the rest fails every attestation with `CertificateChain`. phpseclib refuses an issuer that has no key usage
+extension at all, not only one without `keyCertSign`. `X509::ignoreKeyUsage()` turns that check off for the
+intermediate, but `fromPem()` still requires `keyCertSign` of the root.
 
 ## Using phpseclib Elsewhere in Your Application
 
 The library needs phpseclib 4. phpseclib 3 and 4 are the same Composer package, so your application can
 use only phpseclib 4 alongside it.
 
-`AttestationVerifier` changes no process-wide phpseclib setting. phpseclib's `X509` class keeps its CA
-store, validation date, CRL and URL-fetch callbacks and extension maps in static properties, shared by every
-`X509` object in the process, so the library checks the chain without them: it loads each certificate as
-DER, verifies each issuer's ECDSA signature itself, and never calls `X509::validateSignature()`. It
-neither reads nor adds to the store filled by `X509::addCA()`, and never reaches phpseclib's download of
-issuer certificates from `authorityInfoAccess` URLs, which resolves the host name before it asks the
-callback set with `X509::setURLFetchCallback()`. It decodes the App Attest nonce extension itself and
-registers no ASN.1 map.
+`AttestationVerifier` sets none of phpseclib's process-wide `X509` settings: the CA store, the validation
+date, the CRL and URL-fetch callbacks and the extension maps. They are static properties, shared by every
+`X509` object in the process, so the library checks the chain without them: it verifies each issuer's ECDSA
+signature itself with OpenSSL, before phpseclib parses the certificate, and never calls
+`X509::validateSignature()`. It neither reads nor adds to the store filled by `X509::addCA()`, ignores the
+date set with `X509::setTargetValidationDate()` and the callback set with `X509::setCRLLookupCallback()`, and
+never reaches phpseclib's download of issuer certificates from `authorityInfoAccess` URLs, which resolves the
+host name before it asks the callback set with `X509::setURLFetchCallback()`. It decodes the App Attest nonce
+extension itself and registers no ASN.1 map.
 
-Two process-wide settings of yours still matter:
+phpseclib itself turns ASN.1 cache invalidation back on whenever it decodes a certificate's extensions, which
+verification does: if your code calls `ASN1::disableCacheInvalidation()`, call it again after each
+verification.
+
+Some process-wide settings of yours still matter:
 
 * Do not register a map for the nonce extension, OID `1.2.840.113635.100.8.2`, with
-  `X509::registerExtension()`. phpseclib would decode the extension of every credential certificate with
-  it, so if another map is registered, `verify()` throws a `LogicException` that names the conflict instead
-  of verifying.
+  `X509::registerExtension()`, under the OID or under a name you gave it with `ASN1::loadOIDs()`. phpseclib
+  would decode the extension of every credential certificate with it, so if a map is registered,
+  `verify()` throws a `LogicException` that names the conflict instead of verifying.
+* Do not give the OIDs of standard certificate extensions, such as `id-ce-keyUsage`, another name with
+  `ASN1::loadOIDs()`: phpseclib looks them up by name, so it may stop matching certificates to their
+  issuers, and `TrustAnchor::fromPem()` or every attestation fails. The library itself matches the
+  signature algorithm, the nonce extension and `basicConstraints` by OID, and checks each issuer's
+  signature whatever the names.
 * `X509::ignoreKeyUsage()` and `X509::looseDNComparison()` relax phpseclib's matching of a certificate to
   its issuer, which the library uses. The issuer's signature is still checked, so neither lets a forged
   chain through.

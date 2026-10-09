@@ -77,7 +77,8 @@ tests/
   and never echo key material. Caller errors (bad PEM, counter outside 0..2^32−1, invalid team or bundle
   id, an `$allowed` that is empty or holds anything but `Environment` cases, a `LaunchPolicy` category that
   is not a `ValidationCategory`, `LaunchPolicy::allowing()` with no category, a `TrustAnchor::fromPem()`
-  argument that is not one certificate) are `InvalidArgumentException`, never an `AppAttestException`.
+  argument that is not one certificate or cannot anchor a chain) are `InvalidArgumentException`, never an
+  `AppAttestException`.
 - Psalm dev-master's purity model reports `MissingPureAnnotation` and `MissingImmutableAnnotation`.
   Annotate as the issue suggests (`@psalm-pure`, `@psalm-immutable`, or `@psalm-capabilities read-props`
   on methods and promoted constructors that read properties) and never suppress it.
@@ -91,6 +92,14 @@ tests/
   `tests/Support/`.
 - PHPUnit fails on warnings, notices, deprecations and risky tests: malformed input must raise a typed
   failure, never a PHP warning.
+- Builders sign with phpseclib 4 (`PrivateKey::sign(X509)`) and write DER with `toString(['binary' => true])`:
+  the default output, PEM, is a process-wide setting. Issuers need a key usage with `keyCertSign`, and an
+  `authorityKeyIdentifier`, when present, must equal the issuer's `subjectKeyIdentifier`. phpseclib writes
+  an RSA subject key as RSASSA-PSS unless the key has PKCS #1 padding, and keeps one extension per OID, so
+  `tests/Support/SignedCertificate` takes certificates apart, edits the `tbsCertificate` and signs it again.
+- phpseclib's `X509` and `ASN1` settings are static and PHPUnit runs every test in one process: a test that
+  changes one (an extension map, the CA store, the target date, a callback, an OID name) restores it in
+  `finally`, through reflection where phpseclib has no setter.
 - `phpunit.xml.dist` sets `memory_limit` to 128M, but a test of input built to exhaust memory must not
   rely on it: CI may run with unlimited memory. Assert with `HostileInput::peakMemoryGrowthOf()` that the
   input is refused before it is parsed.
@@ -106,20 +115,33 @@ tests/
 - phpseclib 4's `X509::validateSignature()` trusts the process-wide CA store of `X509::addCA()`, checks a
   process-wide target date, calls the CRL callback, resolves `caIssuers` host names (DNS) before it asks the
   URL-fetch callback, and does not check an issuer's `basicConstraints` `cA` flag. `CertificateChain`
-  never calls it: it loads each certificate with `X509::load($der, ASN1::FORMAT_DER)`, verifies the
-  issuer's ECDSA signature over `getSignableSection()` first, then `isIssuerOf()`, the validity period
-  (`validateDate()` is private in 4) and the intermediate's `cA` flag. `disableURLFetch()` and `loadCA()`
-  no longer exist; do not bring the CA store back.
+  never calls it. It first maps each certificate without X509's rules,
+  `ASN1::map(ASN1::decodeBER($der), Certificate::MAP)`, and checks each issuer's ECDSA signature with
+  `openssl_verify()` over the original `tbsCertificate` bytes:
+  the certificate must be exactly the DER of its three parts, the signature BIT STRING must declare no
+  unused bits, the outer `signatureAlgorithm` must equal the signed one byte for byte and be
+  ecdsa-with-SHA256/384/512 without parameters, and the issuer's key must be EC (OpenSSL reports Edwards
+  keys as another type). Only then does it call `X509::load($der, ASN1::FORMAT_DER)` for `isIssuerOf()`,
+  then checks the validity periods (`validateDate()` is private in 4) and the intermediate's `cA` flag.
+  `disableURLFetch()` and `loadCA()` no longer exist; do not bring the CA store back.
 - phpseclib 4 decodes lazily: a malformed field throws only when it is read, reading a missing key of a
-  `Constructed` creates it and drops the cached encoding, and `X509::load()` replaces the
-  SubjectPublicKeyInfo with a key object. Hence the signature is checked before anything else is read, and
-  the nonce and the SubjectPublicKeyInfo are read from a separate `ASN1::map()` of the credential's
-  bytes. It still warns on some malformed DER, such as an empty OID (hence `ErrorGuard`), and throws
+  `Constructed` creates it and drops the cached encoding, and `X509::load()` runs the SubjectPublicKeyInfo
+  through `PublicKeyLoader` (every key format, then X.509 auto-detection) and replaces it with a key
+  object. Hence no signature is checked through `X509::getSignableSection()`, which re-encodes the
+  certificate once its cache is gone, and nothing untrusted reaches `X509::load()` before its signature
+  verifies. The nonce, the SubjectPublicKeyInfo and `basicConstraints` are read from the rule-less map and
+  matched by dotted OID, never by phpseclib's names, which `ASN1::loadOIDs()` can change. phpseclib still
+  warns on some malformed DER, such as an empty OID (hence `ErrorGuard`), and throws
   `phpseclib4\Exception\*` exceptions.
 - phpseclib keeps extension maps process-wide, `registerExtension()` refuses an OID registered before, even
   with the same map, and a registered map that fails on a value throws out of `getExtension()`. So the
-  library registers no map for the nonce extension; `Internal\NonceExtension` decodes it, and another map
-  registered for its OID is a `LogicException`.
+  library registers no map for the nonce extension; `Internal\NonceExtension` decodes it, and any map
+  registered for its OID, or for a name `ASN1::loadOIDs()` gave it, is a `LogicException`. A credential
+  certificate with the nonce extension twice fails the nonce.
+- `X509::isIssuerOf()` on a certificate from `X509::load()` (not `addCA()`) requires the issuer to carry a
+  key usage extension with `keyCertSign`, so `TrustAnchor::fromPem()` refuses a root without it, or without
+  an EC key: no chain could lead to such a root. phpseclib's own `basicConstraints` check there compares an
+  array with a string and never runs, hence `CertificateChain`'s `cA` check.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.

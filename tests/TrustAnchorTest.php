@@ -4,12 +4,18 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Tests;
 
+use Closure;
 use InvalidArgumentException;
 use LogicException;
+use Oire\AppAttest\Tests\Support\AttestationBuilder;
 use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\Pem;
+use Oire\AppAttest\Tests\Support\RsaKey;
 use Oire\AppAttest\TrustAnchor;
+use phpseclib4\Crypt\Common\PrivateKey;
+use phpseclib4\Crypt\EC;
+use phpseclib4\File\X509;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -91,6 +97,38 @@ final class TrustAnchorTest extends TestCase
         yield 'a sequence holding an integer' => [Pem::fromDer("\x30\x03\x02\x01\x00", Pem::CERTIFICATE)];
     }
 
+    public function testFromPemAcceptsAnEcRootThatCanSignCertificates(): void
+    {
+        $root = self::selfSignedRoot(EC::createKey('secp384r1')->withHash('sha384'));
+
+        self::assertSame($root, TrustAnchor::fromPem($root)->pem);
+    }
+
+    /**
+     * @return iterable<string, array{Closure(): string}>
+     */
+    public static function provideRootsNoChainCanLeadTo(): iterable
+    {
+        yield 'an RSA root' => [static fn(): string => self::selfSignedRoot(RsaKey::generate())];
+        yield 'an Ed25519 root' => [static fn(): string => self::selfSignedRoot(EC::createKey('Ed25519'))];
+        yield 'an EC root without key usage' => [static fn(): string => AttestationBuilder::create()->withRootWithoutKeyUsage()->build()->rootPem];
+        yield 'an EC root whose key usage lacks keyCertSign' => [static fn(): string => self::selfSignedRoot(EC::createKey('secp256r1')->withHash('sha256'), ['digitalSignature', 'cRLSign'])];
+    }
+
+    /**
+     * @param Closure(): string $root
+     */
+    #[DataProvider('provideRootsNoChainCanLeadTo')]
+    public function testFromPemRefusesARootNoChainCanLeadTo(Closure $root): void
+    {
+        $pem = $root();
+
+        self::assertNotFalse(openssl_x509_read($pem));
+
+        $this->expectException(InvalidArgumentException::class);
+        TrustAnchor::fromPem($pem);
+    }
+
     public function testDamagedRootIsRefusedWithoutAPhpError(): void
     {
         $outcomes = Damage::withoutPhpErrors(static fn(): array => array_map(
@@ -110,6 +148,26 @@ final class TrustAnchorTest extends TestCase
         } catch (InvalidArgumentException) {
             return 'refused';
         }
+    }
+
+    /**
+     * @param ?list<string> $keyUsage in place of the one phpseclib's makeCA() gives
+     */
+    private static function selfSignedRoot(PrivateKey $key, ?array $keyUsage = null): string
+    {
+        $dn = ['id-at-commonName' => 'Oire Test Root CA'];
+        $certificate = new X509($key->getPublicKey());
+        $certificate->setSubjectDN($dn);
+        $certificate->setIssuerDN($dn);
+        $certificate->makeCA();
+
+        if ($keyUsage !== null) {
+            $certificate->setExtension('id-ce-keyUsage', $keyUsage);
+        }
+
+        $key->sign($certificate);
+
+        return Pem::fromDer($certificate->toString(['binary' => true]), Pem::CERTIFICATE);
     }
 
     private static function bundledRoot(): string

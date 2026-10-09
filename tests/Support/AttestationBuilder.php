@@ -14,10 +14,15 @@ use DateTimeImmutable;
 use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\Environment;
+use phpseclib4\Crypt\Common\PrivateKey;
+use phpseclib4\Crypt\EC\PrivateKey as EcPrivateKey;
 use phpseclib4\Crypt\PublicKeyLoader;
+use phpseclib4\Crypt\RSA;
+use phpseclib4\Crypt\RSA\PublicKey as RsaPublicKey;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Element;
 use phpseclib4\File\X509;
+use RuntimeException;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -46,6 +51,14 @@ final class AttestationBuilder
     public const string RECEIPT = 'oire-test-receipt';
     public const string FORMAT = 'apple-appattest';
     private const int FLAGS = 0x40;
+    private const string NONCE_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
+
+    /**
+     * 1.2.840.113635.100.8.99, as long as the nonce extension's OID, which takes its place once phpseclib has
+     * written the certificate: phpseclib keeps one extension per OID.
+     */
+    private const string NONCE_PLACEHOLDER_OID = '1.2.840.113635.100.8.99';
+    private const string NONCE_PLACEHOLDER_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x63";
     private AppIdentity $app;
     private string $clientDataHash;
     private DateTimeImmutable $time;
@@ -64,6 +77,22 @@ final class AttestationBuilder
     private ?string $unlistedIssuerUrl = null;
     private string $extensions = '';
     private ?string $coseKey = null;
+    private bool $intermediateSignedByAnotherKey = false;
+    private bool $credentialSignedByAnotherKey = false;
+    private ?string $intermediateIssuerName = null;
+    private ?string $credentialIssuerName = null;
+
+    /**
+     * @var ?list<string>
+     */
+    private ?array $intermediateKeyUsage = null;
+    private bool $rootKeyUsage = true;
+    private string $nonceExtensionSuffix = '';
+    private bool $nonceExtensionTwice = false;
+    private ?string $earlierNonceExtensionDer = null;
+    private string $credentialSignatureHash = 'sha256';
+    private ?PrivateKey $intermediateKey = null;
+    private ?string $credentialSignedAlgorithm = null;
 
     private function __construct()
     {
@@ -262,6 +291,133 @@ final class AttestationBuilder
     }
 
     /**
+     * An intermediate that names the root as its issuer, with the root's key identifier, but is signed by
+     * another key.
+     */
+    public function withIntermediateSignedByAnotherKey(): self
+    {
+        $builder = clone $this;
+        $builder->intermediateSignedByAnotherKey = true;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate that names the intermediate as its issuer, with the intermediate's key
+     * identifier, but is signed by another key.
+     */
+    public function withCredentialSignedByAnotherKey(): self
+    {
+        $builder = clone $this;
+        $builder->credentialSignedByAnotherKey = true;
+
+        return $builder;
+    }
+
+    /**
+     * An intermediate signed by the root's key that names another issuer.
+     */
+    public function withIntermediateIssuerName(string $commonName): self
+    {
+        $builder = clone $this;
+        $builder->intermediateIssuerName = $commonName;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate signed by the intermediate's key that names another issuer.
+     */
+    public function withCredentialIssuerName(string $commonName): self
+    {
+        $builder = clone $this;
+        $builder->credentialIssuerName = $commonName;
+
+        return $builder;
+    }
+
+    /**
+     * A CA intermediate with this key usage in place of the one phpseclib's makeCA() gives it, such as one
+     * without keyCertSign.
+     *
+     * @param list<string> $keyUsage
+     */
+    public function withIntermediateKeyUsage(array $keyUsage): self
+    {
+        $builder = clone $this;
+        $builder->intermediateKeyUsage = $keyUsage;
+
+        return $builder;
+    }
+
+    public function withRootWithoutKeyUsage(): self
+    {
+        $builder = clone $this;
+        $builder->rootKeyUsage = false;
+
+        return $builder;
+    }
+
+    /**
+     * Bytes after the correct value of the nonce extension.
+     */
+    public function withNonceExtensionSuffix(string $bytes): self
+    {
+        $builder = clone $this;
+        $builder->nonceExtensionSuffix = $bytes;
+
+        return $builder;
+    }
+
+    /**
+     * A second nonce extension before the correct one, with this DER as its value or, by default, the correct
+     * value again.
+     */
+    public function withNonceExtensionTwice(?string $earlierDer = null): self
+    {
+        $builder = clone $this;
+        $builder->nonceExtensionTwice = true;
+        $builder->earlierNonceExtensionDer = $earlierDer;
+
+        return $builder;
+    }
+
+    /**
+     * The hash of the intermediate's ECDSA signature on the credential certificate, such as sha1 or sha512.
+     */
+    public function withCredentialSignatureHash(string $hash): self
+    {
+        $builder = clone $this;
+        $builder->credentialSignatureHash = $hash;
+
+        return $builder;
+    }
+
+    /**
+     * An intermediate holding this key, such as an RSA or an Ed25519 one, which signs the credential
+     * certificate; the signature is still labelled ecdsa-with-SHA256.
+     */
+    public function withIntermediateKey(PrivateKey $key): self
+    {
+        $builder = clone $this;
+        $builder->intermediateKey = $key;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate whose signed tbsCertificate holds this signature AlgorithmIdentifier (DER)
+     * while its signatureAlgorithm is ecdsa-with-SHA256, signed by the intermediate with SHA-256.
+     */
+    public function withCredentialSignedAlgorithm(string $algorithm): self
+    {
+        $builder = clone $this;
+        $builder->credentialSignedAlgorithm = $algorithm;
+
+        return $builder;
+    }
+
+    /**
      * The DER of the nonce extension's value for a nonce.
      *
      * @psalm-pure
@@ -283,29 +439,38 @@ final class AttestationBuilder
 
         $rootDn = ['id-at-commonName' => 'Oire Test App Attestation Root CA'];
         $intermediateDn = ['id-at-commonName' => 'Oire Test App Attestation CA'];
+        $intermediatePublicKeyPem = $this->intermediateKey?->getPublicKey()->toString('PKCS8') ?? $intermediateKey->publicKeyPem;
         $rootDer = self::certificate(
             $rootDn,
             $rootKey->publicKeyPem,
             $rootDn,
-            $rootKey,
+            $rootKey->publicKeyPem,
+            self::signer($rootKey),
             true,
             $this->time->modify($this->rootExpired ? '-2 years' : '-1 year'),
             $this->time->modify($this->rootExpired ? '-1 day' : '+10 years'),
+            $this->rootKeyUsage ? [] : ['id-ce-keyUsage' => null],
         );
         $intermediateDer = self::certificate(
             $intermediateDn,
-            $intermediateKey->publicKeyPem,
-            $rootDn,
-            $rootKey,
+            $intermediatePublicKeyPem,
+            ['id-at-commonName' => $this->intermediateIssuerName ?? $rootDn['id-at-commonName']],
+            $rootKey->publicKeyPem,
+            self::signer($this->intermediateSignedByAnotherKey ? EcKey::generate() : $rootKey),
             $this->intermediateIsCa,
             $this->time->modify('-1 year'),
             $this->time->modify('+5 years'),
-            $this->intermediateIsCa ? [] : ['id-ce-keyUsage' => ['keyCertSign']],
+            $this->intermediateExtensions(),
         );
         $credentialExtensions = [];
+        $correctNonce = ($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce)) . $this->nonceExtensionSuffix;
+
+        if ($this->nonceExtensionTwice) {
+            $credentialExtensions[self::NONCE_PLACEHOLDER_OID] = self::octetString($this->earlierNonceExtensionDer ?? $correctNonce);
+        }
 
         if ($this->nonceExtension) {
-            $credentialExtensions[NonceExtension::OID] = new Element(ASN1::encodeDER($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce), ['type' => ASN1::TYPE_OCTET_STRING]));
+            $credentialExtensions[NonceExtension::OID] = self::octetString($correctNonce);
         }
 
         if ($this->unlistedIssuerUrl !== null) {
@@ -315,16 +480,31 @@ final class AttestationBuilder
             ]];
         }
 
+        $unlistedIssuerKey = EcKey::generate();
         $credentialDer = self::certificate(
             ['id-at-commonName' => bin2hex($keyId)],
             $this->credentialPublicKeyPem ?? $credentialKey->publicKeyPem,
-            $this->unlistedIssuerUrl === null ? $intermediateDn : ['id-at-commonName' => 'Oire Test Unlisted CA'],
-            $this->unlistedIssuerUrl === null ? $intermediateKey : EcKey::generate(),
+            ['id-at-commonName' => $this->unlistedIssuerUrl === null ? $this->credentialIssuerName ?? $intermediateDn['id-at-commonName'] : 'Oire Test Unlisted CA'],
+            $this->unlistedIssuerUrl === null ? $intermediatePublicKeyPem : $unlistedIssuerKey->publicKeyPem,
+            self::signer(match (true) {
+                $this->unlistedIssuerUrl !== null => $unlistedIssuerKey,
+                $this->credentialSignedByAnotherKey => EcKey::generate(),
+                default => $intermediateKey,
+            }, $this->credentialSignatureHash),
             false,
             $this->time->modify('-1 day'),
             $this->time->modify('+1 day'),
             $credentialExtensions,
         );
+
+        if ($this->intermediateKey !== null || $this->credentialSignedAlgorithm !== null || $this->nonceExtensionTwice) {
+            $tbsCertificate = str_replace(self::NONCE_PLACEHOLDER_OID_DER, self::NONCE_OID_DER, SignedCertificate::split($credentialDer)[0]);
+            $credentialDer = SignedCertificate::signed(
+                $this->credentialSignedAlgorithm === null ? $tbsCertificate : SignedCertificate::withSignedAlgorithm($tbsCertificate, $this->credentialSignedAlgorithm),
+                SignedCertificate::ECDSA_WITH_SHA256,
+                $this->intermediateKey ?? self::signer($intermediateKey),
+            );
+        }
 
         $attStmt = MapObject::create();
 
@@ -389,36 +569,74 @@ final class AttestationBuilder
     }
 
     /**
-     * @param array<string, string>                          $subjectDn
-     * @param array<string, string>                          $issuerDn
-     * @param array<string, Element|array<array-key, mixed>> $extensions values by extension id
+     * @return array<string, array<array-key, mixed>|null>
+     *
+     * @psalm-capabilities read-props
+     */
+    private function intermediateExtensions(): array
+    {
+        if ($this->intermediateKeyUsage !== null) {
+            return ['id-ce-keyUsage' => $this->intermediateKeyUsage];
+        }
+
+        return $this->intermediateIsCa ? [] : ['id-ce-keyUsage' => ['keyCertSign']];
+    }
+
+    private static function signer(EcKey $key, string $hash = 'sha256'): EcPrivateKey
+    {
+        $signer = PublicKeyLoader::loadPrivateKey($key->privateKeyPem);
+
+        if (!$signer instanceof EcPrivateKey) {
+            throw new RuntimeException('The generated key is not an EC key.');
+        }
+
+        return $signer->withHash($hash);
+    }
+
+    private static function octetString(string $der): Element
+    {
+        return new Element(ASN1::encodeDER($der, ['type' => ASN1::TYPE_OCTET_STRING]));
+    }
+
+    /**
+     * @param array<string, string>                               $subjectDn
+     * @param array<string, string>                               $issuerDn
+     * @param string                                              $subjectPublicKeyPem an RSA key is written as rsaEncryption, not phpseclib's RSASSA-PSS
+     * @param string                                              $issuerPublicKeyPem  the key the authority key identifier names
+     * @param array<string, Element|array<array-key, mixed>|null> $extensions          values by extension id, null to remove one
      */
     private static function certificate(
         array $subjectDn,
         string $subjectPublicKeyPem,
         array $issuerDn,
-        EcKey $issuerKey,
+        string $issuerPublicKeyPem,
+        PrivateKey $signer,
         bool $ca,
         DateTimeImmutable $notBefore,
         DateTimeImmutable $notAfter,
         array $extensions = [],
     ): string {
-        $certificate = new X509(PublicKeyLoader::loadPublicKey($subjectPublicKeyPem));
+        $subjectKey = PublicKeyLoader::loadPublicKey($subjectPublicKeyPem);
+        $certificate = new X509($subjectKey instanceof RsaPublicKey ? $subjectKey->withPadding(RSA::SIGNATURE_PKCS1) : $subjectKey);
         $certificate->setSubjectDN($subjectDn);
         $certificate->setIssuerDN($issuerDn);
         $certificate->setStartDate($notBefore);
         $certificate->setEndDate($notAfter);
-        $certificate->setAuthorityKeyIdentifier((new X509(PublicKeyLoader::loadPublicKey($issuerKey->publicKeyPem)))->createSubjectKeyIdentifier());
+        $certificate->setAuthorityKeyIdentifier((new X509(PublicKeyLoader::loadPublicKey($issuerPublicKeyPem)))->createSubjectKeyIdentifier());
 
         if ($ca) {
             $certificate->makeCA();
         }
 
         foreach ($extensions as $id => $value) {
-            $certificate->setExtension($id, $value);
+            if ($value === null) {
+                $certificate->removeExtension($id);
+            } else {
+                $certificate->setExtension($id, $value);
+            }
         }
 
-        PublicKeyLoader::loadPrivateKey($issuerKey->privateKeyPem)->sign($certificate);
+        $signer->sign($certificate);
 
         return $certificate->toString(['binary' => true]);
     }

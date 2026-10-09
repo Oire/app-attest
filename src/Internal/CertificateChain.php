@@ -8,9 +8,10 @@ use ArrayAccess;
 use DateTimeInterface;
 use LogicException;
 use Oire\AppAttest\TrustAnchor;
-use phpseclib4\Crypt\EC\PublicKey as EcPublicKey;
+use OpenSSLAsymmetricKey;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Maps\BasicConstraints;
 use phpseclib4\File\ASN1\Maps\Certificate;
 use phpseclib4\File\ASN1\Types\BitString;
 use phpseclib4\File\ASN1\Types\Boolean;
@@ -44,13 +45,17 @@ use Throwable;
  *
  * phpseclib's validateSignature() trusts a process-wide CA store, checks dates against a process-wide target
  * date, may resolve caIssuers hosts and calls a process-wide CRL callback, and does not check that an issuer
- * is a CA. So each link is checked here instead: the issuer's ECDSA signature over the original
- * tbsCertificate bytes, phpseclib's issuer matching (names and key identifiers), the validity period and the
- * intermediate's basicConstraints. Verification makes no network call and leaves phpseclib's CA store alone.
+ * is a CA. So each link is checked here instead, signatures first: the issuer's ECDSA signature over the
+ * original tbsCertificate bytes, then phpseclib's issuer matching (names, key identifiers, key usage), the
+ * validity period and the intermediate's basicConstraints. Verification makes no network call and leaves
+ * phpseclib's CA store alone.
  *
  * Every certificate must be exactly one DER SEQUENCE, and an x5c entry at most MAX_LENGTH bytes, before
- * phpseclib reads it: phpseclib ignores bytes after the first element. Each certificate is loaded as DER,
- * never with PEM auto-detection.
+ * phpseclib reads it: phpseclib ignores bytes after the first element. The signatures are checked on a
+ * rule-less ASN1::map() of each certificate, and only then is it loaded with X509::load(), which hands the
+ * SubjectPublicKeyInfo to phpseclib's key parsers. A certificate must also be exactly the DER encoding of its
+ * three parts and its signature strict DER, so its bytes cannot be altered and still pass, ECDSA's own choice
+ * of s or n - s aside.
  *
  * @internal
  */
@@ -58,12 +63,20 @@ final readonly class CertificateChain
 {
     private const int LENGTH = 2;
     private const int MAX_LENGTH = 4096;
+    private const string SEQUENCE_TAG = "\x30";
+    private const string BIT_STRING_TAG = "\x03";
+    private const string NO_UNUSED_BITS = "\x00";
+    private const string BASIC_CONSTRAINTS_OID = '2.5.29.19';
+
+    /**
+     * Hashes by the DER AlgorithmIdentifier of ecdsa-with-SHA256, -SHA384 and -SHA512, with the parameters
+     * absent as RFC 5758 requires.
+     */
     private const array SIGNATURE_HASHES = [
-        'ecdsa-with-SHA256' => 'sha256',
-        'ecdsa-with-SHA384' => 'sha384',
-        'ecdsa-with-SHA512' => 'sha512',
+        "\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02" => 'sha256',
+        "\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x03" => 'sha384',
+        "\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x04" => 'sha512',
     ];
-    private const array EDWARDS_CURVES = ['Ed25519', 'Ed448'];
 
     /**
      * @param ?string $nonce                the octet string inside the nonce extension, if well-formed
@@ -78,7 +91,7 @@ final readonly class CertificateChain
      *
      * @param list<string> $certificates DER, the credential certificate first
      *
-     * @throws LogicException if the process has registered another phpseclib map for the nonce extension
+     * @throws LogicException if the process has registered a phpseclib map for the nonce extension
      */
     public static function tryValidate(array $certificates, TrustAnchor $anchor, DateTimeInterface $time): ?self
     {
@@ -99,50 +112,126 @@ final readonly class CertificateChain
             return null;
         }
 
-        NonceExtension::assertNoOtherMap();
+        NonceExtension::assertNoRegisteredMap();
 
         try {
             return ErrorGuard::call(static function() use ($credentialDer, $intermediateDer, $rootDer, $time): ?self {
-                $root = X509::load($rootDer, ASN1::FORMAT_DER);
-                $intermediate = X509::load($intermediateDer, ASN1::FORMAT_DER);
-                $credential = X509::load($credentialDer, ASN1::FORMAT_DER);
+                $root = self::mapped($rootDer);
+                $intermediate = self::mapped($intermediateDer);
+                $credential = self::mapped($credentialDer);
+
+                if (!self::isSignedBy($intermediateDer, $intermediate, $root) || !self::isSignedBy($credentialDer, $credential, $intermediate)) {
+                    return null;
+                }
+
+                $intermediateCertificate = X509::load($intermediateDer, ASN1::FORMAT_DER);
 
                 if (
                     !self::isValidAt($root, $time)
-                    || !self::isIssuedBy($intermediate, $root, $time)
+                    || !self::isValidAt($intermediate, $time)
+                    || !self::isValidAt($credential, $time)
+                    || !X509::load($rootDer, ASN1::FORMAT_DER)->isIssuerOf($intermediateCertificate)
                     || !self::isCa($intermediate)
-                    || !self::isIssuedBy($credential, $intermediate, $time)
+                    || !$intermediateCertificate->isIssuerOf(X509::load($credentialDer, ASN1::FORMAT_DER))
                 ) {
                     return null;
                 }
 
-                return self::readCredential($credentialDer);
+                return new self(
+                    self::nonceIn($credential),
+                    self::at($credential, Constructed::class, 'tbsCertificate', 'subjectPublicKeyInfo')?->getEncoded() ?? '',
+                );
             });
         } catch (Throwable) {
             return null;
         }
     }
 
-    private static function isIssuedBy(X509 $certificate, X509 $issuer, DateTimeInterface $time): bool
+    /**
+     * Whether the certificate can anchor a chain: it holds an EC key other than an Edwards one, and its key
+     * usage includes keyCertSign, which phpseclib's isIssuerOf() requires of an issuer.
+     */
+    public static function canAnchor(string $rootDer): bool
     {
-        return self::isSignedBy($certificate, $issuer) && $issuer->isIssuerOf($certificate) && self::isValidAt($certificate, $time);
+        try {
+            return ErrorGuard::call(static function() use ($rootDer): bool {
+                $keyUsage = self::at(X509::load($rootDer, ASN1::FORMAT_DER)->getExtension('id-ce-keyUsage'), BitString::class, 'extnValue');
+
+                return self::ecKeyOf(self::mapped($rootDer)) !== null && $keyUsage?->contains('keyCertSign') === true;
+            });
+        } catch (Throwable) {
+            return false;
+        }
     }
 
-    private static function isSignedBy(X509 $certificate, X509 $issuer): bool
+    /**
+     * The certificate mapped without phpseclib's X509 rules, so nothing in it is parsed as a key and its
+     * parts keep their original bytes.
+     */
+    private static function mapped(string $der): ?Constructed
     {
-        $key = $issuer->getPublicKey();
-        $algorithm = self::at($certificate, OID::class, 'signatureAlgorithm', 'algorithm');
-        $hash = $algorithm === null ? null : self::SIGNATURE_HASHES[(string) $algorithm] ?? null;
-        $signature = self::at($certificate, BitString::class, 'signature');
+        $certificate = ASN1::map(ASN1::decodeBER($der), Certificate::MAP);
 
-        if (!$key instanceof EcPublicKey || in_array($key->getCurve(), self::EDWARDS_CURVES, true) || $hash === null || $signature === null) {
+        return $certificate instanceof Constructed ? $certificate : null;
+    }
+
+    /**
+     * Whether the issuer's EC key signed the certificate with ECDSA. The certificate must be exactly the DER
+     * encoding of its parts, with the same AlgorithmIdentifier inside and outside the signed tbsCertificate,
+     * and openssl_verify() refuses a signature that is not strict DER.
+     */
+    private static function isSignedBy(string $der, ?Constructed $certificate, ?Constructed $issuer): bool
+    {
+        $tbsCertificate = self::at($certificate, Constructed::class, 'tbsCertificate');
+        $signedAlgorithm = self::at($tbsCertificate, Constructed::class, 'signature')?->getEncoded();
+        $algorithm = self::at($certificate, Constructed::class, 'signatureAlgorithm')?->getEncoded();
+        $bitString = self::at($certificate, BitString::class, 'signature');
+        $signature = self::signatureBytesOf($bitString);
+        $hash = $algorithm === null ? null : self::SIGNATURE_HASHES[$algorithm] ?? null;
+        $key = self::ecKeyOf($issuer);
+
+        if ($tbsCertificate === null || $algorithm === null || $bitString === null || $signature === null || $hash === null || $key === null || $signedAlgorithm !== $algorithm) {
             return false;
         }
 
-        return $key->withHash($hash)->verify($certificate->getSignableSection(), mb_substr($signature->value, 1, null, '8bit'));
+        $tbsDer = $tbsCertificate->getEncoded();
+
+        return $der === self::encoded(self::SEQUENCE_TAG, $tbsDer . $algorithm . self::encoded(self::BIT_STRING_TAG, $bitString->value))
+            && openssl_verify($tbsDer, $signature, $key, $hash) === 1;
     }
 
-    private static function isValidAt(X509 $certificate, DateTimeInterface $time): bool
+    /**
+     * The signature BIT STRING's bytes, or null unless its leading unused-bits octet declares none.
+     *
+     * @psalm-capabilities read-props
+     */
+    private static function signatureBytesOf(?BitString $signature): ?string
+    {
+        if ($signature === null || mb_substr($signature->value, 0, 1, '8bit') !== self::NO_UNUSED_BITS) {
+            return null;
+        }
+
+        return mb_substr($signature->value, 1, null, '8bit');
+    }
+
+    /**
+     * The certificate's public key, if it is an EC key: OpenSSL reports Edwards keys as another type.
+     */
+    private static function ecKeyOf(?Constructed $certificate): ?OpenSSLAsymmetricKey
+    {
+        $subjectPublicKeyInfo = self::at($certificate, Constructed::class, 'tbsCertificate', 'subjectPublicKeyInfo');
+        $key = $subjectPublicKeyInfo === null ? false : openssl_pkey_get_public(Pem::encode($subjectPublicKeyInfo->getEncoded(), Pem::PUBLIC_KEY));
+        $details = $key === false ? false : openssl_pkey_get_details($key);
+
+        return $key !== false && is_array($details) && ($details['type'] ?? null) === OPENSSL_KEYTYPE_EC ? $key : null;
+    }
+
+    private static function encoded(string $tag, string $content): string
+    {
+        return $tag . ASN1::encodeLength(mb_strlen($content, '8bit')) . $content;
+    }
+
+    private static function isValidAt(?Constructed $certificate, DateTimeInterface $time): bool
     {
         $notBefore = self::timeOf(self::at($certificate, Choice::class, 'tbsCertificate', 'validity', 'notBefore'));
         $notAfter = self::timeOf(self::at($certificate, Choice::class, 'tbsCertificate', 'validity', 'notAfter'));
@@ -150,41 +239,44 @@ final readonly class CertificateChain
         return $notBefore !== null && $notAfter !== null && $time >= $notBefore && $time <= $notAfter;
     }
 
-    private static function isCa(X509 $certificate): bool
+    private static function isCa(?Constructed $certificate): bool
     {
-        return self::at($certificate->getExtension('id-ce-basicConstraints'), Boolean::class, 'extnValue', 'cA')?->value === true;
+        $basicConstraints = self::extensionValues($certificate, self::BASIC_CONSTRAINTS_OID)[0] ?? null;
+
+        return $basicConstraints !== null
+            && self::at(ASN1::map(ASN1::decodeBER($basicConstraints), BasicConstraints::MAP), Boolean::class, 'cA')?->value === true;
     }
 
     /**
-     * The nonce and the SubjectPublicKeyInfo, read from the credential certificate's original bytes:
-     * X509::load() replaces the key with a key object, which would encode it again, and decodes extensions
-     * with phpseclib's process-wide maps.
+     * The nonce, or null unless the credential certificate holds exactly one nonce extension.
      */
-    private static function readCredential(string $credentialDer): self
+    private static function nonceIn(?Constructed $credential): ?string
     {
-        $tbsCertificate = self::at(ASN1::map(ASN1::decodeBER($credentialDer), Certificate::MAP), Constructed::class, 'tbsCertificate');
+        $values = self::extensionValues($credential, NonceExtension::OID);
 
-        return new self(
-            self::nonceIn(self::at($tbsCertificate, Constructed::class, 'extensions')),
-            self::at($tbsCertificate, Constructed::class, 'subjectPublicKeyInfo')?->getEncoded() ?? '',
-        );
+        return count($values) === 1 && isset($values[0]) ? NonceExtension::tryDecode($values[0]) : null;
     }
 
-    private static function nonceIn(?Constructed $extensions): ?string
+    /**
+     * The value of every extension with the OID, matched by the dotted OID rather than phpseclib's name.
+     *
+     * @return list<?string>
+     */
+    private static function extensionValues(?Constructed $certificate, string $oid): array
     {
+        $extensions = self::at($certificate, Constructed::class, 'tbsCertificate', 'extensions');
         $count = $extensions === null ? 0 : count($extensions);
+        $values = [];
 
         for ($index = 0; $index < $count; ++$index) {
             $id = self::at($extensions, OID::class, $index, 'extnId');
 
-            if ($id !== null && ASN1::getOIDFromName((string) $id) === NonceExtension::OID) {
-                $value = self::at($extensions, OctetString::class, $index, 'extnValue');
-
-                return $value === null ? null : NonceExtension::tryDecode($value->value);
+            if ($id !== null && ASN1::getOIDFromName((string) $id) === $oid) {
+                $values[] = self::at($extensions, OctetString::class, $index, 'extnValue')?->value;
             }
         }
 
-        return null;
+        return $values;
     }
 
     private static function timeOf(?Choice $time): ?DateTimeInterface

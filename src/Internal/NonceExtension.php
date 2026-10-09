@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
-use Exception;
 use LogicException;
 use phpseclib4\File\ASN1;
 use phpseclib4\File\ASN1\Constructed;
 use phpseclib4\File\ASN1\Types\OctetString;
 use phpseclib4\File\X509;
+use Throwable;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -33,7 +33,7 @@ use phpseclib4\File\X509;
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
  * The library decodes the extension's value itself and registers no map with phpseclib, which keeps
- * extension maps process-wide. Another map registered for the OID would change how phpseclib decodes every
+ * extension maps process-wide. A map registered for the OID would change how phpseclib decodes every
  * credential certificate, so it is a misconfigured process, not a failed verification.
  *
  * @internal
@@ -41,7 +41,7 @@ use phpseclib4\File\X509;
 final class NonceExtension
 {
     public const string OID = '1.2.840.113635.100.8.2';
-    public const array MAP = [
+    private const array MAP = [
         'type' => ASN1::TYPE_SEQUENCE,
         'children' => [
             'nonce' => [
@@ -53,14 +53,17 @@ final class NonceExtension
     ];
 
     /**
-     * @throws LogicException if the process has registered another map for the OID
+     * phpseclib looks an extension's map up by the name ASN1::loadOIDs() may have given the OID, so both are
+     * checked.
+     *
+     * @throws LogicException if the process has registered a map for the OID
      */
-    public static function assertNoOtherMap(): void
+    public static function assertNoRegisteredMap(): void
     {
-        $registered = X509::getRegisteredExtension(self::OID);
+        $registered = X509::getRegisteredExtension(self::OID) ?? X509::getRegisteredExtension(ASN1::getNameFromOID(self::OID));
 
-        if ($registered !== null && $registered !== self::MAP) {
-            throw new LogicException('Another ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.');
+        if ($registered !== null) {
+            throw new LogicException('An ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.');
         }
     }
 
@@ -77,7 +80,7 @@ final class NonceExtension
             $decoded = ASN1::map(ASN1::decodeBER($value), self::MAP);
 
             return $decoded instanceof Constructed && $decoded->offsetExists('nonce') ? self::octetsOf($decoded['nonce']) : null;
-        } catch (Exception) {
+        } catch (Throwable) {
             return null;
         }
     }
