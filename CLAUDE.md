@@ -56,6 +56,7 @@ tests/
 ## Conventions
 
 - PHP 8.3+, extensions gmp, mbstring, openssl, sodium. `declare(strict_types=1);` everywhere.
+- phpseclib 4 only (namespace `phpseclib4\`); phpseclib 3 is not supported.
 - Final classes (abstract exception base excepted), readonly value objects. Public API classes carry
   `@psalm-api`, implementation details live in `Internal/` and are `@internal`.
 - **Verification only.** No state, no I/O: no network, no filesystem except reading the bundled root, no
@@ -102,10 +103,23 @@ tests/
   `openssl_pkey_get_details()`'s `x`/`y`, which drop leading zero bytes.
 - `clientDataHash` may be any length (Apple's guide sample uses a raw 24-byte challenge), and attestation
   `authData` may carry bytes after the credential public key.
-- phpseclib does not check an intermediate's `basicConstraints` `cA` flag (`CertificateChain` does), fetches
-  `caIssuers` URLs unless `X509::disableURLFetch()` is called, warns on malformed DER (hence
-  `ErrorGuard`), and keeps extension maps globally (hence one shared `Internal\NonceExtension`, whose
-  conflict with another registered map is a `LogicException`).
+- phpseclib 4's `X509::validateSignature()` trusts the process-wide CA store of `X509::addCA()`, checks a
+  process-wide target date, calls the CRL callback, resolves `caIssuers` host names (DNS) before it asks the
+  URL-fetch callback, and does not check an issuer's `basicConstraints` `cA` flag. `CertificateChain`
+  never calls it: it loads each certificate with `X509::load($der, ASN1::FORMAT_DER)`, verifies the
+  issuer's ECDSA signature over `getSignableSection()` first, then `isIssuerOf()`, the validity period
+  (`validateDate()` is private in 4) and the intermediate's `cA` flag. `disableURLFetch()` and `loadCA()`
+  no longer exist; do not bring the CA store back.
+- phpseclib 4 decodes lazily: a malformed field throws only when it is read, reading a missing key of a
+  `Constructed` creates it and drops the cached encoding, and `X509::load()` replaces the
+  SubjectPublicKeyInfo with a key object. Hence the signature is checked before anything else is read, and
+  the nonce and the SubjectPublicKeyInfo are read from a separate `ASN1::map()` of the credential's
+  bytes. It still warns on some malformed DER, such as an empty OID (hence `ErrorGuard`), and throws
+  `phpseclib4\Exception\*` exceptions.
+- phpseclib keeps extension maps process-wide, `registerExtension()` refuses an OID registered before, even
+  with the same map, and a registered map that fails on a value throws out of `getExtension()`. So the
+  library registers no map for the nonce extension; `Internal\NonceExtension` decodes it, and another map
+  registered for its OID is a `LogicException`.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.

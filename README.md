@@ -30,7 +30,7 @@ PHP 8.3 or later with the _GMP_, _Mbstring_, _OpenSSL_ and _Sodium_ extensions. 
 suggested, because decoding a large number from untrusted CBOR without it takes time quadratic in the
 number's length, and every attestation is untrusted input.
 
-The library depends on [phpseclib](https://phpseclib.com/) for X.509, on
+The library depends on [phpseclib](https://phpseclib.com/) 4 for X.509, on
 [spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR, and on
 [psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface.
 
@@ -121,8 +121,8 @@ performs Apple's attestation steps in order:
    and `authData`, and `authData` is long enough for its layout, with one CBOR map, the COSE key, as the
    credential public key after the `credentialId`.
 2. `x5c` holds exactly two certificates, the credential certificate and an intermediate. The intermediate
-   is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, and all
-   three are valid at the clock's time.
+   is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, each
+   signed by its issuer with ECDSA, as Apple's are, and all three are valid at the clock's time.
 3. The nonce, the SHA-256 of `authData` followed by `clientDataHash`, equals the one inside the credential
    certificate's extension `1.2.840.113635.100.8.2`.
 4. The SHA-256 of the credential certificate's public key (its raw 65-byte uncompressed point) equals
@@ -429,24 +429,32 @@ use Oire\AppAttest\TrustAnchor;
 $verifier = new AttestationVerifier(TrustAnchor::fromPem($testRootPem));
 ```
 
+Like Apple's, a test chain must use EC keys, sign with ECDSA over SHA-256, SHA-384 or SHA-512, and give its
+root and intermediate the `keyCertSign` key usage.
+
 ## Using phpseclib Elsewhere in Your Application
 
-`AttestationVerifier` changes two process-wide settings of phpseclib's `X509` class. Both are static, so
-they affect every `X509` object in the same process, not only this library's:
+The library needs phpseclib 4. phpseclib 3 and 4 are the same Composer package, so your application can
+use only phpseclib 4 alongside it.
 
-* it calls `X509::disableURLFetch()`, so phpseclib no longer downloads issuer certificates from the
-  `authorityInfoAccess` URLs of the certificates it validates;
-* it registers an ASN.1 map for the App Attest nonce extension, OID `1.2.840.113635.100.8.2`, with
-  `X509::registerExtension()`, so phpseclib decodes that extension into an array for every certificate it
-  loads.
+`AttestationVerifier` changes no process-wide phpseclib setting. phpseclib's `X509` class keeps its CA
+store, validation date, CRL and URL-fetch callbacks and extension maps in static properties, shared by every
+`X509` object in the process, so the library checks the chain without them: it loads each certificate as
+DER, verifies each issuer's ECDSA signature itself, and never calls `X509::validateSignature()`. It
+neither reads nor adds to the store filled by `X509::addCA()`, and never reaches phpseclib's download of
+issuer certificates from `authorityInfoAccess` URLs, which resolves the host name before it asks the
+callback set with `X509::setURLFetchCallback()`. It decodes the App Attest nonce extension itself and
+registers no ASN.1 map.
 
-Both happen on every call to `AttestationVerifier::verify()`, not once. If your own code relies on
-phpseclib fetching issuer certificates, call `X509::enableURLFetch()` again after each verification,
-before your code validates its own certificates.
+Two process-wide settings of yours still matter:
 
-Do not register a map for `1.2.840.113635.100.8.2` yourself. If one other than the library's is already
-registered, phpseclib refuses the library's map, and `verify()` throws a `LogicException` that names the
-conflict instead of verifying.
+* Do not register a map for the nonce extension, OID `1.2.840.113635.100.8.2`, with
+  `X509::registerExtension()`. phpseclib would decode the extension of every credential certificate with
+  it, so if another map is registered, `verify()` throws a `LogicException` that names the conflict instead
+  of verifying.
+* `X509::ignoreKeyUsage()` and `X509::looseDNComparison()` relax phpseclib's matching of a certificate to
+  its issuer, which the library uses. The issuer's signature is still checked, so neither lets a forged
+  chain through.
 
 ## Testing Your Own Code
 

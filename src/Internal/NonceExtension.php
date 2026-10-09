@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
+use Exception;
 use LogicException;
-use phpseclib3\File\ASN1;
-use phpseclib3\File\X509;
-use RuntimeException;
+use phpseclib4\File\ASN1;
+use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Types\OctetString;
+use phpseclib4\File\X509;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -30,8 +32,9 @@ use RuntimeException;
  * Apple's nonce extension on the credential certificate, OID 1.2.840.113635.100.8.2:
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
- * phpseclib keeps extension maps globally, so the verifier and the test builders register this one map.
- * Another map already registered for the OID is a misconfigured process, not a failed verification.
+ * The library decodes the extension's value itself and registers no map with phpseclib, which keeps
+ * extension maps process-wide. Another map registered for the OID would change how phpseclib decodes every
+ * credential certificate, so it is a misconfigured process, not a failed verification.
  *
  * @internal
  */
@@ -52,12 +55,38 @@ final class NonceExtension
     /**
      * @throws LogicException if the process has registered another map for the OID
      */
-    public static function register(): void
+    public static function assertNoOtherMap(): void
     {
-        try {
-            X509::registerExtension(self::OID, self::MAP);
-        } catch (RuntimeException $e) {
-            throw new LogicException('Another ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.', 0, $e);
+        $registered = X509::getRegisteredExtension(self::OID);
+
+        if ($registered !== null && $registered !== self::MAP) {
+            throw new LogicException('Another ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.');
         }
+    }
+
+    /**
+     * The octet string inside the extension's value, or null if the value is not exactly the SEQUENCE.
+     */
+    public static function tryDecode(string $value): ?string
+    {
+        if (!Der::isOneSequence($value)) {
+            return null;
+        }
+
+        try {
+            $decoded = ASN1::map(ASN1::decodeBER($value), self::MAP);
+
+            return $decoded instanceof Constructed && $decoded->offsetExists('nonce') ? self::octetsOf($decoded['nonce']) : null;
+        } catch (Exception) {
+            return null;
+        }
+    }
+
+    /**
+     * @psalm-capabilities read-props
+     */
+    private static function octetsOf(mixed $value): ?string
+    {
+        return $value instanceof OctetString ? $value->value : null;
     }
 }

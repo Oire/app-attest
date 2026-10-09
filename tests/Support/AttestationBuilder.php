@@ -14,12 +14,10 @@ use DateTimeImmutable;
 use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\Environment;
-use phpseclib3\Crypt\Common\PrivateKey;
-use phpseclib3\Crypt\Common\PublicKey;
-use phpseclib3\Crypt\PublicKeyLoader;
-use phpseclib3\File\ASN1\Element;
-use phpseclib3\File\X509;
-use RuntimeException;
+use phpseclib4\Crypt\PublicKeyLoader;
+use phpseclib4\File\ASN1;
+use phpseclib4\File\ASN1\Element;
+use phpseclib4\File\X509;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -150,6 +148,10 @@ final class AttestationBuilder
         return $builder;
     }
 
+    /**
+     * An intermediate without basicConstraints that still claims the keyCertSign key usage, so only the CA
+     * check refuses the chain.
+     */
     public function withIntermediateNotCa(): self
     {
         $builder = clone $this;
@@ -271,8 +273,6 @@ final class AttestationBuilder
 
     public function build(): BuiltAttestation
     {
-        NonceExtension::register();
-
         $rootKey = EcKey::generate();
         $intermediateKey = EcKey::generate();
         $credentialKey = $this->leadingZeroX ? EcKey::generateWithLeadingZeroX() : EcKey::generate();
@@ -300,11 +300,12 @@ final class AttestationBuilder
             $this->intermediateIsCa,
             $this->time->modify('-1 year'),
             $this->time->modify('+5 years'),
+            $this->intermediateIsCa ? [] : ['id-ce-keyUsage' => ['keyCertSign']],
         );
         $credentialExtensions = [];
 
         if ($this->nonceExtension) {
-            $credentialExtensions[NonceExtension::OID] = new Element($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce));
+            $credentialExtensions[NonceExtension::OID] = new Element(ASN1::encodeDER($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce), ['type' => ASN1::TYPE_OCTET_STRING]));
         }
 
         if ($this->unlistedIssuerUrl !== null) {
@@ -402,44 +403,23 @@ final class AttestationBuilder
         DateTimeImmutable $notAfter,
         array $extensions = [],
     ): string {
-        $publicKey = PublicKeyLoader::loadPublicKey($subjectPublicKeyPem);
-        $privateKey = PublicKeyLoader::loadPrivateKey($issuerKey->privateKeyPem);
-
-        if (!$publicKey instanceof PublicKey || !$privateKey instanceof PrivateKey) {
-            throw new RuntimeException('Cannot load the generated keys into phpseclib.');
-        }
-
-        $subject = new X509();
-        $subject->setDN($subjectDn);
-        $subject->setPublicKey($publicKey);
-
-        $issuer = new X509();
-        $issuer->setDN($issuerDn);
-        $issuer->setPrivateKey($privateKey);
-
-        $certificate = new X509();
+        $certificate = new X509(PublicKeyLoader::loadPublicKey($subjectPublicKeyPem));
+        $certificate->setSubjectDN($subjectDn);
+        $certificate->setIssuerDN($issuerDn);
         $certificate->setStartDate($notBefore);
         $certificate->setEndDate($notAfter);
+        $certificate->setAuthorityKeyIdentifier((new X509(PublicKeyLoader::loadPublicKey($issuerKey->publicKeyPem)))->createSubjectKeyIdentifier());
 
         if ($ca) {
             $certificate->makeCA();
         }
 
         foreach ($extensions as $id => $value) {
-            $certificate->setExtensionValue($id, $value);
+            $certificate->setExtension($id, $value);
         }
 
-        return self::der($certificate, $certificate->sign($issuer, $subject));
-    }
+        PublicKeyLoader::loadPrivateKey($issuerKey->privateKeyPem)->sign($certificate);
 
-    private static function der(X509 $certificate, mixed $signed): string
-    {
-        $der = is_array($signed) ? $certificate->saveX509($signed, X509::FORMAT_DER) : false;
-
-        if (!is_string($der)) {
-            throw new RuntimeException('Cannot sign the test certificate.');
-        }
-
-        return $der;
+        return $certificate->toString(['binary' => true]);
     }
 }

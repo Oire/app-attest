@@ -1,3 +1,25 @@
+# Version 1.1.0 (Unreleased)
+
+The library moves to phpseclib 4.
+
+## Changes
+
+* **phpseclib 4 is required:** `phpseclib/phpseclib` `^4.0` replaces `^3.0.57`. phpseclib 3 and 4 are the
+  same Composer package, so an application that needs phpseclib 3 elsewhere cannot install this version
+  and should stay on 1.0 until it moves to phpseclib 4. The library's own API is unchanged.
+* **No process-wide phpseclib settings are changed.** phpseclib 4's `X509::validateSignature()` trusts a
+  process-wide CA store, checks a process-wide validation date, calls the CRL callback and resolves
+  `caIssuers` host names before it asks the URL-fetch callback, so `AttestationVerifier` no longer calls
+  it. It checks each link of the chain itself: the issuer's ECDSA signature over the certificate's
+  original `tbsCertificate` bytes, phpseclib's issuer matching, the validity period and, as before, the
+  intermediate's `basicConstraints` `cA` flag. It no longer calls `X509::disableURLFetch()`, which
+  phpseclib 4 removed, and no longer registers the nonce extension with `X509::registerExtension()`: it
+  decodes the extension itself. Another map registered for the nonce extension is still a
+  `LogicException`.
+* Certificates in the chain must be signed with ECDSA over SHA-256, SHA-384 or SHA-512, as Apple's are,
+  and phpseclib 4 requires an issuer's key usage to include `keyCertSign`. This matters only to test chains
+  passed to `TrustAnchor::fromPem()`.
+
 # Version 1.0.0
 
 The first release: verification of Apple App Attest attestations and assertions, following Apple's

@@ -9,7 +9,8 @@ use LogicException;
 use Oire\AppAttest\Internal\Der;
 use Oire\AppAttest\Internal\ErrorGuard;
 use Oire\AppAttest\Internal\Pem;
-use phpseclib3\File\X509;
+use phpseclib4\File\ASN1;
+use phpseclib4\File\X509;
 use Throwable;
 
 /**
@@ -104,7 +105,7 @@ final readonly class TrustAnchor
     private static function isParsable(string $der): bool
     {
         try {
-            return ErrorGuard::call(static fn(): bool => is_array((new X509())->loadX509($der, X509::FORMAT_DER)));
+            return ErrorGuard::call(static fn(): bool => X509::load($der, ASN1::FORMAT_DER)->toArray() !== []);
         } catch (Throwable) {
             return false;
         }

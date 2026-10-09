@@ -8,11 +8,16 @@ use CBOR\Decoder;
 use CBOR\Normalizable;
 use CBOR\StringStream;
 use DateTimeImmutable;
+use DateTimeInterface;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
 use Oire\AppAttest\Value\TeamId;
-use phpseclib3\File\X509;
+use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Types\BaseString;
+use phpseclib4\File\ASN1\Types\Boolean;
+use phpseclib4\File\ASN1\Types\Choice;
+use phpseclib4\File\X509;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -253,13 +258,14 @@ final class BuildersTest extends TestCase
         $attestation = AttestationBuilder::create()
             ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
             ->build();
-        $credential = new X509();
-        self::assertIsArray($credential->loadX509($attestation->credentialDer));
+        $credential = X509::load($attestation->credentialDer);
+        $authorityInfoAccess = $credential->getExtension('id-pe-authorityInfoAccess')['extnValue'] ?? null;
+        self::assertInstanceOf(Constructed::class, $authorityInfoAccess);
 
-        self::assertSame(['Oire Test Unlisted CA'], $credential->getIssuerDNProp('id-at-commonName'));
+        self::assertSame(['Oire Test Unlisted CA'], array_map(static fn(BaseString $name): string => $name->value, $credential->getIssuerDNProps('id-at-commonName')));
         self::assertSame(
             [['accessMethod' => 'id-ad-caIssuers', 'accessLocation' => ['uniformResourceIdentifier' => 'http://192.0.2.1/ca.cer']]],
-            $credential->getExtension('id-pe-authorityInfoAccess'),
+            $authorityInfoAccess->toArray(true),
         );
         self::assertNotNull(self::nonceExtensionOf($attestation->credentialDer));
     }
@@ -388,34 +394,47 @@ final class BuildersTest extends TestCase
 
     private static function issuedBy(string $certificate, string $issuer): bool
     {
-        $x509 = new X509();
-        self::assertTrue($x509->loadCA($issuer));
-        self::assertIsArray($x509->loadX509($certificate));
+        X509::addCA($issuer);
+        X509::setTargetValidationDate(null);
 
-        return $x509->validateSignature() === true;
+        try {
+            return X509::load($certificate)->validateSignature();
+        } finally {
+            X509::clearCAStore();
+            X509::setTargetValidationDate('now');
+        }
     }
 
     private static function isCa(string $certificate): bool
     {
-        $x509 = new X509();
-        self::assertIsArray($x509->loadX509($certificate));
+        $basicConstraints = X509::load($certificate)->getExtension('id-ce-basicConstraints')['extnValue'] ?? null;
 
-        return self::assertsCa($x509->getExtension('id-ce-basicConstraints'));
-    }
+        if ($basicConstraints === null) {
+            return false;
+        }
 
-    /**
-     * @psalm-pure
-     */
-    private static function assertsCa(mixed $basicConstraints): bool
-    {
-        return is_array($basicConstraints) && ($basicConstraints['cA'] ?? false) === true;
+        self::assertInstanceOf(Constructed::class, $basicConstraints);
+        $cA = $basicConstraints['cA'];
+        self::assertInstanceOf(Boolean::class, $cA);
+
+        return $cA->value;
     }
 
     private static function validAt(string $certificate, DateTimeImmutable $time): bool
     {
-        $x509 = new X509();
-        self::assertIsArray($x509->loadX509($certificate));
+        $tbsCertificate = X509::load($certificate)['tbsCertificate'];
+        self::assertInstanceOf(Constructed::class, $tbsCertificate);
+        $validity = $tbsCertificate['validity'];
+        self::assertInstanceOf(Constructed::class, $validity);
 
-        return $x509->validateDate($time);
+        return $time >= self::timeOf($validity['notBefore']) && $time <= self::timeOf($validity['notAfter']);
+    }
+
+    private static function timeOf(mixed $choice): DateTimeInterface
+    {
+        self::assertInstanceOf(Choice::class, $choice);
+        self::assertInstanceOf(DateTimeInterface::class, $choice->value);
+
+        return $choice->value;
     }
 }

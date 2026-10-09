@@ -45,8 +45,8 @@ use Oire\AppAttest\Value\LaunchPolicy;
 use Oire\AppAttest\Value\TeamId;
 use Oire\AppAttest\Value\ValidationCategory;
 use Override;
-use phpseclib3\File\ASN1;
-use phpseclib3\File\X509;
+use phpseclib4\File\ASN1;
+use phpseclib4\File\X509;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Clock\ClockInterface;
@@ -91,8 +91,7 @@ final class AttestationVerifierTest extends TestCase
     #[Override]
     protected function tearDown(): void
     {
-        X509::setURLFetchCallback(null);
-        X509::disableURLFetch();
+        X509::setURLFetchCallback(static fn(): bool => false);
     }
 
     #[DataProvider('provideGenuineVectors')]
@@ -289,7 +288,6 @@ final class AttestationVerifierTest extends TestCase
             ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
             ->build();
         $fetched = [];
-        X509::enableURLFetch();
         X509::setURLFetchCallback(static function(string $host) use (&$fetched): bool {
             $fetched[] = $host;
 
@@ -885,7 +883,8 @@ final class AttestationVerifierTest extends TestCase
     }
 
     /**
-     * Damage that makes phpseclib raise a warning, found by damaging every byte of the certificates.
+     * Damage that makes phpseclib 4 raise a warning (an empty OID), found by XORing every byte of the
+     * certificates with every mask.
      *
      * @return iterable<string, array{bool, int, int}>
      *
@@ -893,15 +892,12 @@ final class AttestationVerifierTest extends TestCase
      */
     public static function provideCertificateDamageThatMakesPhpseclibWarn(): iterable
     {
-        yield 'credential byte 9 XOR 0x01' => [false, 9, 0x01];
-        yield 'credential byte 385 XOR 0x80' => [false, 385, 0x80];
-        yield 'credential byte 386 XOR 0x01' => [false, 386, 0x01];
-        yield 'credential byte 387 XOR 0xFF' => [false, 387, 0xFF];
-        yield 'credential byte 417 XOR 0xFF' => [false, 417, 0xFF];
-        yield 'intermediate byte 9 XOR 0x01' => [true, 9, 0x01];
-        yield 'intermediate byte 360 XOR 0x80' => [true, 360, 0x80];
-        yield 'intermediate byte 395 XOR 0x01' => [true, 395, 0x01];
-        yield 'intermediate byte 460 XOR 0xFF' => [true, 460, 0xFF];
+        yield 'credential byte 299 XOR 0x07' => [false, 299, 0x07];
+        yield 'credential byte 308 XOR 0x08' => [false, 308, 0x08];
+        yield 'credential byte 646 XOR 0x08' => [false, 646, 0x08];
+        yield 'intermediate byte 245 XOR 0x07' => [true, 245, 0x07];
+        yield 'intermediate byte 254 XOR 0x05' => [true, 254, 0x05];
+        yield 'intermediate byte 467 XOR 0x08' => [true, 467, 0x08];
     }
 
     #[DataProvider('provideCertificateDamageThatMakesPhpseclibWarn')]
