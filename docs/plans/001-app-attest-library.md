@@ -25,7 +25,7 @@ to the caller, who passes the stored public key and counter in and stores the ne
 - [ ] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
       a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
       each with its own `$reason`
-- [ ] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
+- [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
 - [ ] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
       time
@@ -200,45 +200,49 @@ Dependencies (Composer; versions pinned to majors):
   `src/Exception/AssertionFailureReason.php`
 - Create: `src/TrustAnchor.php`, `resources/Apple_App_Attestation_Root_CA.pem`
 - Create: `tests/TrustAnchorTest.php`, `tests/Value/TeamIdTest.php`, `tests/Value/BundleIdTest.php`,
-  `tests/Value/AppIdentityTest.php`, `tests/Value/AttestedKeyTest.php`, `tests/Exception/ExceptionsTest.php`
+  `tests/Value/AppIdentityTest.php`, `tests/Value/AttestedKeyTest.php`, `tests/Exception/ExceptionsTest.php`,
+  `tests/Value/EnvironmentTest.php`
 
 Layout, iridium-style: the verifiers, `TrustAnchor` and `SystemClock` at the root of `src/`; value
 objects in `Value/`; exceptions and their reason enums in `Exception/`; implementation details in
 `Internal/` (Task 4).
 
 #### Steps
-- [ ] `TeamId` (readonly, `public string $value`): exactly 10 characters of `A-Z0-9`, else
+- [x] `TeamId` (readonly, `public string $value`): exactly 10 characters of `A-Z0-9`, else
       `InvalidArgumentException`
-- [ ] `BundleId` (readonly, `public string $value`): non-empty, only `A-Za-z0-9`, `-` and `.`, else
+- [x] `BundleId` (readonly, `public string $value`): non-empty, only `A-Za-z0-9`, `-` and `.`, else
       `InvalidArgumentException`
-- [ ] `AppIdentity(TeamId $teamId, BundleId $bundleId)` with `appId()` = `"<teamId>.<bundleId>"` and
+- [x] `AppIdentity(TeamId $teamId, BundleId $bundleId)` with `appId()` = `"<teamId>.<bundleId>"` and
       `rpIdHash()` = SHA-256 of it (raw bytes); with valid parts it cannot be invalid, so it validates
       nothing itself
-- [ ] `Environment` enum (`production`, `development`) with the `aaguid` each stands for: `appattest`
-      followed by seven zero bytes, and `appattestdevelop`
-- [ ] `AttestedKey` (readonly): `keyId` (raw 32 bytes), `publicKeyPem`, `environment`, `receipt` (raw
+- [x] `Environment` enum (`production`, `development`) with the `aaguid` each stands for: `appattest`
+      followed by seven zero bytes, and `appattestdevelop`; `Environment::tryFromAaguid()` maps an aaguid
+      back for Task 4
+- [x] `AttestedKey` (readonly): `keyId` (raw 32 bytes), `publicKeyPem`, `environment`, `receipt` (raw
       bytes), `counter` (always 0 from an attestation), and `keyIdBase64Url()` — the key id as unpadded
       base64url, for callers that store or index it as text
-- [ ] `AppAttestException` is `abstract` and extends `RuntimeException`, so one `catch` covers both
+- [x] `AppAttestException` is `abstract` and extends `RuntimeException`, so one `catch` covers both
       verifiers; `AttestationException` and `AssertionException` (`final`) extend it and carry
       `public readonly AttestationFailureReason $reason` / `public readonly AssertionFailureReason $reason`
       and a message naming the check. Attestation reasons: `Format`, `CertificateChain`, `Nonce`,
       `KeyId`, `RpIdHash`, `Counter`, `Environment`; assertion reasons: `Format`, `Signature`,
       `RpIdHash`, `Counter` — exactly the cases in the public API below
-- [ ] `TrustAnchor::apple()` loads the bundled root and **checks its SHA-256 fingerprint against the
+- [x] `TrustAnchor::apple()` loads the bundled root and **checks its SHA-256 fingerprint against the
       constant on every load**, throwing a `LogicException` on a mismatch; `TrustAnchor::fromPem()` exists
       for the tests' own chains. The constant sits beside the file with a comment saying where it came
-      from and when it was fetched
-- [ ] Psalm's `findUnusedCode` would flag public API members only consumers use (`AttestedKey::$receipt`,
+      from and when it was fetched. The check itself is the `@internal` `TrustAnchor::fromPinnedPem($pem,
+      $sha256)`, which the tamper test calls; PEM is decoded to DER without `openssl_x509_read`, which
+      warns on garbage, and `fromPem()` parses with phpseclib in DER mode (plan execution, 2026-10-09)
+- [x] Psalm's `findUnusedCode` would flag public API members only consumers use (`AttestedKey::$receipt`,
       `AttestedKey::keyIdBase64Url()`, `TrustAnchor::fromPem`): mark public API classes `@psalm-api`
       rather than inventing test reads
-- [ ] tests: the bundled root's fingerprint equals the constant; a tampered PEM handed to the loader's
+- [x] tests: the bundled root's fingerprint equals the constant; a tampered PEM handed to the loader's
       check fails; `AppIdentity::rpIdHash()` for the neutral `ABCDE12345.com.example.app` equals a
       pinned value; team ids that are short, long, lowercase or contain punctuation and bundle ids that
       are empty or contain a space or `_` are refused; `keyIdBase64Url()` round-trips through
       `sodium_base642bin` and has no padding; each exception carries the reason it was built with and is
       an `AppAttestException`
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ### Task 3: Golden vectors and the test-only builders
 
