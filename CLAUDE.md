@@ -135,6 +135,6 @@ tests/
 ## Releasing
 
 Update `CHANGELOG.md`, re-fetch Apple's root and compare its fingerprint with
-`TrustAnchor::APPLE_ROOT_SHA256`, then push a `vX.Y.Z` tag. `release.yml` creates the GitHub Release with
-generated notes; it needs the tag to exist on GitHub (`--verify-tag`). Packagist updates through its
-GitHub webhook, not through the workflow.
+`TrustAnchor::APPLE_ROOT_SHA256`, then push a `vX.Y.Z` tag. `release.yml` creates the GitHub Release, titled
+"Version X.Y.Z", with generated notes; it needs the tag to exist on GitHub (`--verify-tag`). Packagist updates
+through its GitHub webhook, not through the workflow.
