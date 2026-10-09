@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4', '8.5']
+
+    name: PHP ${{ matrix.php }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: gmp, mbstring, openssl, sodium
+          coverage: none
+          tools: composer
+
+      # `composer install` from the committed lock, never `update`: Psalm is pinned to `dev-master`,
+      # so `update` would analyze with whatever that branch happens to be today. Dependabot's lock
+      # updates are what keep the dependencies current.
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Lint and static analysis
+        run: composer lint
+
+      - name: Run tests
+        run: composer test

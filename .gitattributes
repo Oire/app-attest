@@ -1,0 +1,24 @@
+# Normalize line endings to LF everywhere
+* text=auto eol=lf
+
+# Golden vectors stay byte-for-byte as the references ship them
+tests/fixtures/** binary
+
+# https://php.watch/articles/composer-gitattributes
+# Exclude development files from the Composer archive.
+# resources/ is NOT excluded: it holds the Apple root certificate read at run time.
+/.github                export-ignore
+/docs                   export-ignore
+/tests                  export-ignore
+/.editorconfig          export-ignore
+/.gitattributes         export-ignore
+/.gitignore             export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/CLAUDE.md              export-ignore
+/compose.yaml           export-ignore
+/Dockerfile             export-ignore
+/phpunit.xml.dist       export-ignore
+/psalm.xml.dist         export-ignore
+
+# Configure diff output for .php files
+*.php diff=php
