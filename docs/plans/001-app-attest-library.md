@@ -31,10 +31,12 @@ to the caller, who passes the stored public key and counter in and stores the ne
       time
 - [x] all binary handling is 8-bit-safe under Oire's code style (Development approach)
 - [ ] Psalm level 1, PHP CS Fixer with Oire's rules and PHPUnit pass in CI on PHP 8.3, 8.4 and 8.5
-- [ ] Dependabot watches Composer and GitHub Actions; pushing a `v*` tag creates the GitHub Release
-- [ ] README documents installation, both verifiers, the reasons, and what the caller must do itself
+- [x] Dependabot watches Composer and GitHub Actions; pushing a `v*` tag creates the GitHub Release
+- [x] README documents installation, both verifiers, the reasons, and what the caller must do itself
 - [ ] `v1.0.0` is tagged, the package is on Packagist, and the repository's description and topics are
       set
+      ⚠️ The description, homepage and topics were set in Task 6; the tag and Packagist are left to
+      Post-completion (plan execution, 2026-10-09)
 - [ ] all validation commands pass
 
 ## Validation commands
@@ -409,7 +411,7 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 - Modify: `README.md`, `CHANGELOG.md`, `CLAUDE.md`
 
 #### Steps
-- [ ] README: what App Attest is in two paragraphs; installation; registration and assertion examples,
+- [x] README: what App Attest is in two paragraphs; installation; registration and assertion examples,
       in which the client sends the key id, attestation and assertion as unpadded base64url and the
       server decodes them with `sodium_base642bin(…, SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING)` (noting
       that Apple's `generateKey()` returns the key id in standard base64, so the client converts it);
@@ -421,15 +423,23 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       to the team and bundle); that any PSR-20 clock can be passed (Symfony's included); the test
       builders' recipe for consumers who need their own assertions; credits and licenses of the two
       references
-- [ ] `CHANGELOG.md` `1.0.0`; `CLAUDE.md` with the conventions, the 8-bit rule (and why: the code style's
+      ⚠️ The test builders are export-ignored, so the README gives the assertion recipe as code consumers
+      copy (signing the nonce SHA-256(`authenticatorData` ‖ SHA-256(`clientData`)), as corrected in Task 5)
+      and links to `AttestationBuilder` on GitHub for attestations. It also documents what the code does
+      beyond the plan's list: `clientDataHash` of any length, the stored PEM passed unchanged (one
+      uncompressed P-256 `PUBLIC KEY` block, never a path or a certificate), `LogicException` from
+      `TrustAnchor::apple()`, and the process-wide phpseclib settings (`X509::disableURLFetch()` and the
+      registered nonce extension map). Every example was run against a genuine vector on PHP 8.5 and 8.3
+      (plan execution, 2026-10-09)
+- [x] `CHANGELOG.md` `1.0.0`; `CLAUDE.md` with the conventions, the 8-bit rule (and why: the code style's
       `mb_str_functions`), the import rule, the base64url rule, `openssl_verify === 1`, and the
       "verification only, no state, no I/O" rule
-- [ ] repository metadata through `gh repo edit Oire/app-attest`: `--description "Verify Apple App Attest
+- [x] repository metadata through `gh repo edit Oire/app-attest`: `--description "Verify Apple App Attest
       attestations and assertions in PHP: certificate chain, nonce, key id, counter. Stateless, no I/O."`,
       `--homepage https://packagist.org/packages/oire/app-attest`, and `--add-topic` for `php`,
       `app-attest`, `apple`, `ios`, `devicecheck`, `attestation`, `security`, `cbor`, `x509`,
       `php-library`; confirm with `gh repo view Oire/app-attest --json description,homepageUrl,repositoryTopics`
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ## Technical details
 
