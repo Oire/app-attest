@@ -137,9 +137,10 @@ tests/
   `phpseclib4\Exception\*` exceptions.
 - phpseclib keeps extension maps process-wide, `registerExtension()` refuses an OID registered before, even
   with the same map, and a registered map that fails on a value throws out of `getExtension()`. So the
-  library registers no map for the nonce extension; `Internal\NonceExtension` decodes it, and any map
-  registered for its OID, or for a name `ASN1::loadOIDs()` gave it, is a `LogicException`. A credential
-  certificate with the nonce extension twice fails the nonce.
+  library registers no map for the nonce extension: `Internal\NonceExtension` decodes it from the rule-less
+  map, where a map the process registered for its OID, or for a name `ASN1::loadOIDs()` gave it, changes
+  nothing. Do not bring back a guard that reads the registered maps. A credential certificate with the
+  nonce extension twice fails the nonce.
 - `X509::isIssuerOf()` reads the process-wide `X509::ignoreKeyUsage()`, `X509::looseDNComparison()` and
   `X509::ignoreBasicConstraints()` switches (its `basicConstraints` check compares an array with a string and
   never runs), so `CertificateChain` does not call it. It requires the child's issuer Name to equal the

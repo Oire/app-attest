@@ -21,8 +21,6 @@ before.
   and registered the nonce extension's map process-wide. Applications that called `X509::enableURLFetch()`
   after each verification, as the 1.0 README advised, must drop the call (phpseclib 4 has no such method),
   and phpseclib no longer decodes the nonce extension of certificates your own code loads.
-* **Any phpseclib map registered for the nonce extension is a `LogicException`,** under its OID or a name
-  given to it with `ASN1::loadOIDs()`, even a map identical to the one 1.0 registered.
 
 ## Changes
 
@@ -36,7 +34,9 @@ before.
   the authority and subject key identifiers as phpseclib matched them, the validity periods and, as before,
   the intermediate's `basicConstraints` `cA` flag. Extensions and the signature algorithm are matched by
   OID, whatever names `ASN1::loadOIDs()` gave them.
-* The nonce extension is decoded by the library itself, without `X509::registerExtension()`.
+* The nonce extension is decoded by the library itself, without `X509::registerExtension()`, so a
+  phpseclib map registered for its OID no longer matters: 1.0 threw a `LogicException` for any map other
+  than its own.
 * Verification leaves ASN.1 cache invalidation as the application set it; only `TrustAnchor::fromPem()`
   still parses a certificate with phpseclib's `X509`, which turns it back on.
 * A credential certificate with the nonce extension twice fails the nonce, and a certificate with its key

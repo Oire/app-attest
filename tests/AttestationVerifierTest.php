@@ -21,7 +21,6 @@ use CBOR\UnsignedIntegerObject;
 use Closure;
 use DateTimeImmutable;
 use InvalidArgumentException;
-use LogicException;
 use Oire\AppAttest\AttestationVerifier;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
@@ -335,24 +334,21 @@ final class AttestationVerifierTest extends TestCase
         self::assertSame([], $fetched);
     }
 
-    public function testAnotherNonceExtensionMapIsALogicException(): void
+    /**
+     * @return iterable<string, array{?string}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideNonceMapNames(): iterable
     {
-        $attestation = AttestationBuilder::create()->build();
-        $extensions = new ReflectionProperty(X509::class, 'extensions');
-        $registered = (array) $extensions->getValue();
-        $extensions->setValue(null, [NonceExtension::OID => ['type' => ASN1::TYPE_OCTET_STRING]] + $registered);
-
-        try {
-            $this->expectException(LogicException::class);
-            self::verifyBuilt($attestation);
-        } finally {
-            $extensions->setValue(null, $registered);
-        }
+        yield 'under its OID' => [null];
+        yield 'under a name given with ASN1::loadOIDs()' => ['oireAppAttestNonce'];
     }
 
-    public function testNonceMapRegisteredUnderAnOidNameIsALogicException(): void
+    #[DataProvider('provideNonceMapNames')]
+    public function testNonceMapRegisteredByTheProcessChangesNothing(?string $name): void
     {
-        $attestation = AttestationBuilder::create()->build();
+        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
         $oids = new ReflectionProperty(ASN1::class, 'oids');
         $reverseOids = new ReflectionProperty(ASN1::class, 'reverseOIDs');
         $extensions = new ReflectionProperty(X509::class, 'extensions');
@@ -361,10 +357,13 @@ final class AttestationVerifierTest extends TestCase
         $registered = (array) $extensions->getValue();
 
         try {
-            ASN1::loadOIDs(['oireAppAttestNonce' => NonceExtension::OID]);
-            X509::registerExtension('oireAppAttestNonce', ['type' => ASN1::TYPE_OCTET_STRING]);
-            $this->expectException(LogicException::class);
-            self::verifyBuilt($attestation);
+            if ($name !== null) {
+                ASN1::loadOIDs([$name => NonceExtension::OID]);
+            }
+
+            X509::registerExtension($name ?? NonceExtension::OID, ['type' => ASN1::TYPE_OCTET_STRING]);
+            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
+            self::assertFailure(AttestationFailureReason::Nonce, static fn() => self::verifyVector($vector, clientDataHash: hash('sha256', 'another challenge', true)));
         } finally {
             $extensions->setValue(null, $registered);
             $oids->setValue(null, $savedOids);

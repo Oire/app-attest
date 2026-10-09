@@ -6,7 +6,6 @@ namespace Oire\AppAttest\Internal;
 
 use ArrayAccess;
 use DateTimeInterface;
-use LogicException;
 use Oire\AppAttest\TrustAnchor;
 use OpenSSLAsymmetricKey;
 use phpseclib4\File\ASN1;
@@ -96,8 +95,6 @@ final readonly class CertificateChain
      * The validated chain, or null if the certificates do not form one.
      *
      * @param list<string> $certificates DER, the credential certificate first
-     *
-     * @throws LogicException if the process has registered a phpseclib map for the nonce extension
      */
     public static function tryValidate(array $certificates, TrustAnchor $anchor, DateTimeInterface $time): ?self
     {
@@ -117,8 +114,6 @@ final readonly class CertificateChain
         ) {
             return null;
         }
-
-        NonceExtension::assertNoRegisteredMap();
 
         try {
             return ErrorGuard::call(static function() use ($credentialDer, $intermediateDer, $rootDer, $time): ?self {

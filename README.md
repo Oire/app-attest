@@ -360,12 +360,9 @@ cannot be mistaken for a forged request:
 * a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate, or whose certificate has no
   EC key or no key usage that includes `keyCertSign`, so that no chain could lead to it.
 
-A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
-
-* `TrustAnchor::apple()`, which `AttestationVerifier` calls when you pass no trust anchor, throws one if the
-  bundled Apple root is missing or does not match its pinned fingerprint;
-* `AttestationVerifier::verify()` throws one if your process has registered a phpseclib ASN.1 map for the
-  nonce extension, OID `1.2.840.113635.100.8.2` (see Using phpseclib Elsewhere in Your Application).
+A broken installation is a `LogicException`, not a failed verification: `TrustAnchor::apple()`, which
+`AttestationVerifier` calls when you pass no trust anchor, throws one if the bundled Apple root is missing or
+does not match its pinned fingerprint.
 
 ## What You Must Do Yourself
 
@@ -456,16 +453,13 @@ name before it asks the callback set with `X509::setURLFetchCallback()`. `X509::
 `keyCertSign` of each issuer, the CA flag of the intermediate, matching key identifiers, and an issuer name
 equal byte for byte to the issuer's subject name. It matches extensions and the signature algorithm by
 OID, so names given to OIDs with `ASN1::loadOIDs()` change nothing either. It decodes the App Attest nonce
-extension itself and registers no ASN.1 map.
+extension itself and registers no ASN.1 map, and a map your code registers for the extension's OID,
+`1.2.840.113635.100.8.2`, with `X509::registerExtension()` does not affect verification.
 
 Verification leaves ASN.1 cache invalidation as your code set it. `TrustAnchor::fromPem()` does not: it
 parses the certificate with phpseclib's `X509`, which turns cache invalidation back on whenever it decodes a
 certificate's extensions, so if your code calls `ASN1::disableCacheInvalidation()`, call it again after
 `fromPem()`.
-
-Do not register a map for the nonce extension, OID `1.2.840.113635.100.8.2`, with
-`X509::registerExtension()`, under the OID or under a name you gave it with `ASN1::loadOIDs()`: while one is
-registered, `verify()` throws a `LogicException` that names the conflict instead of verifying.
 
 ## Testing Your Own Code
 

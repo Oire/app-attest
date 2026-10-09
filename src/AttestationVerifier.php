@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Oire\AppAttest;
 
 use InvalidArgumentException;
-use LogicException;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
 use Oire\AppAttest\Internal\AuthenticatorData;
@@ -70,7 +69,6 @@ final readonly class AttestationVerifier
      *
      * @throws InvalidArgumentException if $allowed is empty or holds anything but Environment cases
      * @throws AttestationException     if the attestation fails a check; its reason names the check
-     * @throws LogicException           if the process has registered a phpseclib map for the nonce extension
      */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey
     {
