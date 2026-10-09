@@ -23,7 +23,7 @@
         "ext-mbstring": "*",
         "ext-openssl": "*",
         "ext-sodium": "*",
-        "phpseclib/phpseclib": "^3.0.57",
+        "phpseclib/phpseclib": "^3.0.57 || ^4.0.0",
         "psr/clock": "^1.0",
         "spomky-labs/cbor-php": "^3.4"
     },
