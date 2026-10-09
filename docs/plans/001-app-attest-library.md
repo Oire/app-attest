@@ -161,32 +161,34 @@ Dependencies (Composer; versions pinned to majors):
   `tests/SmokeTest.php`
 
 #### Steps
-- [ ] `composer.json`: name `oire/app-attest`, description, `"license": "Apache-2.0"`, `"php": ">=8.3"`,
+- [x] `composer.json`: name `oire/app-attest`, description, `"license": "Apache-2.0"`, `"php": ">=8.3"`,
       `ext-gmp`, `ext-mbstring`, `ext-openssl`, `ext-sodium`, the dependencies from Context, `authors`,
       `support` (pointing at `Oire/app-attest`) and `funding` as in iridium, PSR-4 `Oire\AppAttest\` →
       `src/` and `Oire\AppAttest\Tests\` → `tests/`, the `oire/php-code-style` VCS repository, scripts
       written out: `"test": "phpunit"` and `"lint": ["php-cs-fixer fix --dry-run --diff", "psalm
-      --no-cache"]`, and `"config": {"platform": {"php": "8.3.0"}, "sort-packages": true}` so the
+      --no-cache"]`, and `"config": {"platform": {"php": "8.3.16"}, "sort-packages": true}` so the
       committed lock resolves for the oldest supported PHP and the 8.3 job can install it (a lock made on
-      8.5 with open dev constraints would pull packages that need 8.4); commit `composer.lock`
-- [ ] `.gitattributes`: `* text=auto eol=lf`; `tests/fixtures/** binary`; iridium-style `export-ignore`
+      8.5 with open dev constraints would pull packages that need 8.4); commit `composer.lock`.
+      ⚠️ The platform is 8.3.16, not 8.3.0: `vimeo/psalm` `dev-master` requires `~8.3.16` on 8.3,
+      so 8.3.0 cannot resolve; CI's 8.3 job gets the latest 8.3 patch release (plan execution, 2026-10-09)
+- [x] `.gitattributes`: `* text=auto eol=lf`; `tests/fixtures/** binary`; iridium-style `export-ignore`
       for `tests/`, `docs/`, `.github/`, the Docker and tool config files — and **not** for
       `resources/`, which holds the Apple root `TrustAnchor::apple()` reads at run time
-- [ ] Psalm, PHPUnit and CS Fixer configured as in `oire/iridium`; the finder covers `src` and `tests`
-- [ ] `SystemClock` implements `Psr\Clock\ClockInterface` and returns `new DateTimeImmutable()`, with
+- [x] Psalm, PHPUnit and CS Fixer configured as in `oire/iridium`; the finder covers `src` and `tests`
+- [x] `SystemClock` implements `Psr\Clock\ClockInterface` and returns `new DateTimeImmutable()`, with
       `use DateTimeImmutable;` (Development approach, imports)
-- [ ] CI on `ubuntu-latest`, `permissions: contents: read`, a matrix over PHP 8.3, 8.4 and 8.5
+- [x] CI on `ubuntu-latest`, `permissions: contents: read`, a matrix over PHP 8.3, 8.4 and 8.5
       (`shivammathur/setup-php` with `gmp`, `mbstring` and `sodium`), running `composer install` (never
       `update`), lint and test
-- [ ] `.github/dependabot.yml` copied from iridium: `composer` and `github-actions`, daily at 04:00
+- [x] `.github/dependabot.yml` copied from iridium: `composer` and `github-actions`, daily at 04:00
       Europe/Berlin, assigned to `Menelion`. Because CI never runs `composer update`, Dependabot's lock
       updates are what keep the dependencies current
-- [ ] `.github/release.yml` copied from iridium (release-note categories, Dependabot excluded);
+- [x] `.github/release.yml` copied from iridium (release-note categories, Dependabot excluded);
       `.github/workflows/release.yml` runs on `push` of tags `v*` with `permissions: contents: write` and
       creates the release with `gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes`.
       Packagist is updated by its webhook, not by this workflow (Post-completion)
-- [ ] a smoke test that autoloads the namespace and reads the time from `SystemClock`
-- [ ] validation commands pass, CI green
+- [x] a smoke test that autoloads the namespace and reads the time from `SystemClock`
+- [x] validation commands pass, CI green (CI: checked on the pull request)
 
 ### Task 2: Value types, exceptions and the trust anchor
 
