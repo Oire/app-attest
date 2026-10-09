@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest;
 
+use LogicException;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
 use Oire\AppAttest\Internal\AuthenticatorData;
@@ -61,6 +62,7 @@ final readonly class AttestationVerifier
      * @param list<Environment> $allowed         the environments a key may come from
      *
      * @throws AttestationException if the attestation fails a check; its reason names the check
+     * @throws LogicException       if the process has registered another phpseclib map for the nonce extension
      */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed): AttestedKey
     {
@@ -76,42 +78,42 @@ final readonly class AttestationVerifier
             || !is_string($receipt)
             || !is_string($authDataBytes)
         ) {
-            throw self::failure(AttestationFailureReason::Format, 'The attestation is not an apple-appattest object with x5c, receipt and authData.');
+            throw new AttestationException(AttestationFailureReason::Format, 'The attestation is not an apple-appattest object with x5c, receipt and authData.');
         }
 
         $authData = AuthenticatorData::tryFromAttestation($authDataBytes)
-            ?? throw self::failure(AttestationFailureReason::Format, 'The authenticator data is shorter than its layout requires.');
+            ?? throw new AttestationException(AttestationFailureReason::Format, 'The authenticator data is shorter than its layout requires.');
 
         $chain = CertificateChain::tryValidate($certificates, $this->root, $this->clock->now())
-            ?? throw self::failure(AttestationFailureReason::CertificateChain, 'The certificate chain does not lead to the trust anchor or is not valid at this time.');
+            ?? throw new AttestationException(AttestationFailureReason::CertificateChain, 'The certificate chain does not lead to the trust anchor or is not valid at this time.');
 
         if ($chain->nonce === null || !hash_equals(hash('sha256', $authDataBytes . $clientDataHash, true), $chain->nonce)) {
-            throw self::failure(AttestationFailureReason::Nonce, 'The nonce in the credential certificate does not match the authenticator data and client data hash.');
+            throw new AttestationException(AttestationFailureReason::Nonce, 'The nonce in the credential certificate does not match the authenticator data and client data hash.');
         }
 
         $point = EcPoint::tryFromSubjectPublicKeyInfo($chain->subjectPublicKeyInfo)
-            ?? throw self::failure(AttestationFailureReason::Format, 'The credential certificate does not hold an uncompressed P-256 public key.');
+            ?? throw new AttestationException(AttestationFailureReason::Format, 'The credential certificate does not hold an uncompressed P-256 public key.');
 
         if (!hash_equals($point->keyId(), $keyId)) {
-            throw self::failure(AttestationFailureReason::KeyId, 'The credential certificate public key does not match the key id.');
+            throw new AttestationException(AttestationFailureReason::KeyId, 'The credential certificate public key does not match the key id.');
         }
 
         if (!hash_equals($app->rpIdHash(), $authData->rpIdHash)) {
-            throw self::failure(AttestationFailureReason::RpIdHash, 'The authenticator data rpIdHash does not match the app id.');
+            throw new AttestationException(AttestationFailureReason::RpIdHash, 'The authenticator data rpIdHash does not match the app id.');
         }
 
         if ($authData->counter !== 0) {
-            throw self::failure(AttestationFailureReason::Counter, 'The authenticator data counter of an attestation must be 0.');
+            throw new AttestationException(AttestationFailureReason::Counter, 'The authenticator data counter of an attestation must be 0.');
         }
 
         $environment = Environment::tryFromAaguid($authData->aaguid);
 
         if ($environment === null || !in_array($environment, $allowed, true)) {
-            throw self::failure(AttestationFailureReason::Environment, 'The authenticator data aaguid does not name an allowed environment.');
+            throw new AttestationException(AttestationFailureReason::Environment, 'The authenticator data aaguid does not name an allowed environment.');
         }
 
         if (!hash_equals($point->keyId(), $authData->credentialId)) {
-            throw self::failure(AttestationFailureReason::KeyId, 'The authenticator data credentialId does not match the key id.');
+            throw new AttestationException(AttestationFailureReason::KeyId, 'The authenticator data credentialId does not match the key id.');
         }
 
         return new AttestedKey($point->keyId(), $point->publicKeyPem(), $environment, $receipt);
@@ -139,13 +141,5 @@ final readonly class AttestationVerifier
         }
 
         return $certificates;
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function failure(AttestationFailureReason $reason, string $message): AttestationException
-    {
-        return new AttestationException($reason, $message);
     }
 }

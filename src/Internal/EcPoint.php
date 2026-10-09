@@ -83,9 +83,7 @@ final readonly class EcPoint
      */
     public function publicKeyPem(): string
     {
-        return "-----BEGIN PUBLIC KEY-----\n"
-            . chunk_split(base64_encode($this->subjectPublicKeyInfo), 64, "\n")
-            . "-----END PUBLIC KEY-----\n";
+        return Pem::encode($this->subjectPublicKeyInfo, Pem::PUBLIC_KEY);
     }
 
     /**

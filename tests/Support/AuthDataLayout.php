@@ -2,11 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Oire\AppAttest;
-
-use DateTimeImmutable;
-use Override;
-use Psr\Clock\ClockInterface;
+namespace Oire\AppAttest\Tests\Support;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -26,15 +22,19 @@ use Psr\Clock\ClockInterface;
  */
 
 /**
- * The PSR-20 clock used when the caller passes none: the current system time.
+ * Byte offsets of the authenticator data, restated for the tests independently of the library.
  *
- * @psalm-api
+ * @psalm-pure
  */
-final readonly class SystemClock implements ClockInterface
+final class AuthDataLayout
 {
-    #[Override]
-    public function now(): DateTimeImmutable
-    {
-        return new DateTimeImmutable();
-    }
+    public const int RP_ID_HASH_LENGTH = 32;
+    public const int FLAGS_OFFSET = 32;
+    public const int COUNTER_OFFSET = 33;
+    public const int COUNTER_LENGTH = 4;
+    public const int ASSERTION_LENGTH = 37;
+    public const int AAGUID_OFFSET = 37;
+    public const int AAGUID_LENGTH = 16;
+    public const int CREDENTIAL_ID_LENGTH_OFFSET = 53;
+    public const int CREDENTIAL_ID_OFFSET = 55;
 }

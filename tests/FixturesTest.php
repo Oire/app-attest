@@ -9,6 +9,8 @@ use CBOR\Normalizable;
 use CBOR\StringStream;
 use Oire\AppAttest\Tests\Support\AssertionVector;
 use Oire\AppAttest\Tests\Support\AttestationVector;
+use Oire\AppAttest\Tests\Support\ClientDataHashFormation;
+use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\Tests\Support\VectorOrigin;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -61,7 +63,7 @@ final class FixturesTest extends TestCase
         $credentialDer = $document['attStmt']['x5c'][0] ?? null;
         self::assertIsString($credentialDer);
 
-        $certificate = openssl_x509_parse("-----BEGIN CERTIFICATE-----\n" . chunk_split(base64_encode($credentialDer), 64, "\n") . "-----END CERTIFICATE-----\n");
+        $certificate = openssl_x509_parse(Pem::fromDer($credentialDer, Pem::CERTIFICATE));
         self::assertIsArray($certificate);
         self::assertIsInt($certificate['validFrom_time_t'] ?? null);
         self::assertIsInt($certificate['validTo_time_t'] ?? null);
@@ -83,6 +85,30 @@ final class FixturesTest extends TestCase
         self::assertStringContainsString($vector->challenge, $vector->clientData);
         self::assertGreaterThan($vector->previousCounter, $vector->expectedCounter);
         self::assertOriginHolds($vector->origin, $vector->bytes);
+    }
+
+    #[DataProvider('provideAttestationsFromYaml')]
+    public function testAttestationSidecarMatchesItsSourceDocument(AttestationVector $vector): void
+    {
+        $document = self::sourceDocumentOf($vector->origin);
+
+        self::assertSame(ClientDataHashFormation::Sha256, $vector->clientDataHashFormation);
+        self::assertStringContainsString("\nclientDataBase64: " . base64_encode($vector->challenge) . "\n", $document);
+        self::assertStringContainsString("\nclientDataHashSha256Base64: " . base64_encode($vector->clientDataHash) . "\n", $document);
+        self::assertStringContainsString("\ntimestamp: '" . $vector->verifyAt->format('Y-m-d\\TH:i:s.v\\Z') . "'\n", $document);
+        self::assertSourceDocumentNamesTheKey($document, $vector->teamId, $vector->bundleId, $vector->keyId, $vector->expectedPublicKeyPem, $vector->environment->value);
+    }
+
+    #[DataProvider('provideAssertionsFromYaml')]
+    public function testAssertionSidecarMatchesItsSourceDocument(AssertionVector $vector): void
+    {
+        $document = self::sourceDocumentOf($vector->origin);
+
+        self::assertStringContainsString("\nclientDataBase64: " . base64_encode($vector->clientData) . "\n", $document);
+        self::assertStringContainsString("\nchallengeBase64: " . base64_encode($vector->challenge) . "\n", $document);
+        self::assertStringContainsString("\ncounter: " . $vector->expectedCounter . "\n", $document);
+        self::assertStringContainsString("\ntimestamp: '" . $vector->verifyAt->format('Y-m-d\\TH:i:s.v\\Z') . "'\n", $document);
+        self::assertSourceDocumentNamesTheKey($document, $vector->teamId, $vector->bundleId, $vector->keyId, $vector->publicKeyPem, $vector->environment->value);
     }
 
     public function testEveryVectorIsListedInTheReadme(): void
@@ -112,6 +138,64 @@ final class FixturesTest extends TestCase
     {
         foreach (Fixtures::assertions() as $name => $vector) {
             yield $name => [$vector];
+        }
+    }
+
+    /**
+     * @return iterable<string, array{AttestationVector}>
+     */
+    public static function provideAttestationsFromYaml(): iterable
+    {
+        foreach (Fixtures::attestations() as $name => $vector) {
+            if ($vector->origin->documentId !== null) {
+                yield $name => [$vector];
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{AssertionVector}>
+     */
+    public static function provideAssertionsFromYaml(): iterable
+    {
+        foreach (Fixtures::assertions() as $name => $vector) {
+            if ($vector->origin->documentId !== null) {
+                yield $name => [$vector];
+            }
+        }
+    }
+
+    /**
+     * The document of the copied multi-document YAML file whose id the sidecar names, with a leading
+     * newline so that every key can be matched at the start of a line.
+     */
+    private static function sourceDocumentOf(VectorOrigin $origin): string
+    {
+        $source = file_get_contents($origin->copyPath);
+        self::assertIsString($source);
+        $documentId = $origin->documentId;
+        self::assertIsString($documentId);
+
+        $matching = array_values(array_filter(
+            explode("\n---\n", "\n" . $source . "\n"),
+            static fn(string $document): bool => str_contains("\n" . $document . "\n", "\nid: " . $documentId . "\n"),
+        ));
+        self::assertCount(1, $matching);
+        $document = $matching[0] ?? null;
+        self::assertIsString($document);
+
+        return "\n" . $document . "\n";
+    }
+
+    private static function assertSourceDocumentNamesTheKey(string $document, string $teamId, string $bundleId, string $keyId, string $publicKeyPem, string $environment): void
+    {
+        self::assertStringContainsString("\nteamIdentifier: " . $teamId . "\n", $document);
+        self::assertStringContainsString("\nbundleIdentifier: " . $bundleId . "\n", $document);
+        self::assertStringContainsString("\nenvironment: " . $environment . "\n", $document);
+        self::assertStringContainsString("\nkeyIdBase64: " . base64_encode($keyId) . "\n", $document);
+
+        foreach (array_filter(explode("\n", $publicKeyPem), static fn(string $line): bool => $line !== '') as $line) {
+            self::assertStringContainsString("\n  " . $line . "\n", $document);
         }
     }
 

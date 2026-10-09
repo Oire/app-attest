@@ -7,11 +7,11 @@ namespace Oire\AppAttest;
 use InvalidArgumentException;
 use Oire\AppAttest\Exception\AssertionException;
 use Oire\AppAttest\Exception\AssertionFailureReason;
+use Oire\AppAttest\Internal\AuthenticatorData;
 use Oire\AppAttest\Internal\Cbor;
 use Oire\AppAttest\Internal\EcPoint;
-use Oire\AppAttest\Internal\ErrorGuard;
+use Oire\AppAttest\Internal\Pem;
 use Oire\AppAttest\Value\AppIdentity;
-use Throwable;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -38,9 +38,6 @@ use Throwable;
  */
 final readonly class AssertionVerifier
 {
-    private const int AUTHENTICATOR_DATA_LENGTH = 37;
-    private const int RP_ID_HASH_LENGTH = 32;
-    private const int COUNTER_OFFSET = 33;
     private const int MAX_COUNTER = 0xFFFFFFFF;
 
     /**
@@ -67,80 +64,49 @@ final readonly class AssertionVerifier
         $document = Cbor::tryDecodeMap($assertionCbor) ?? [];
         $signature = $document['signature'] ?? null;
         $authenticatorData = $document['authenticatorData'] ?? null;
+        $authData = is_string($authenticatorData) ? AuthenticatorData::tryFromAssertion($authenticatorData) : null;
 
-        if (
-            !is_string($signature)
-            || !is_string($authenticatorData)
-            || mb_strlen($authenticatorData, '8bit') < self::AUTHENTICATOR_DATA_LENGTH
-        ) {
-            throw self::failure(AssertionFailureReason::Format, 'The assertion is not an object with a signature and 37 bytes of authenticatorData.');
+        if (!is_string($signature) || !is_string($authenticatorData) || $authData === null) {
+            throw new AssertionException(
+                AssertionFailureReason::Format,
+                'The assertion is not an object with a signature and ' . AuthenticatorData::ASSERTION_LENGTH . ' bytes of authenticatorData.',
+            );
         }
 
         $nonce = hash('sha256', $authenticatorData . hash('sha256', $clientData, true), true);
 
         if (!self::isSignedBy($nonce, $signature, $point)) {
-            throw self::failure(AssertionFailureReason::Signature, 'The assertion signature does not verify with the public key.');
+            throw new AssertionException(AssertionFailureReason::Signature, 'The assertion signature does not verify with the public key.');
         }
 
-        if (!hash_equals($app->rpIdHash(), mb_substr($authenticatorData, 0, self::RP_ID_HASH_LENGTH, '8bit'))) {
-            throw self::failure(AssertionFailureReason::RpIdHash, 'The authenticator data rpIdHash does not match the app id.');
+        if (!hash_equals($app->rpIdHash(), $authData->rpIdHash)) {
+            throw new AssertionException(AssertionFailureReason::RpIdHash, 'The authenticator data rpIdHash does not match the app id.');
         }
 
-        $counter = self::counterOf($authenticatorData);
-
-        if ($counter <= $previousCounter) {
-            throw self::failure(AssertionFailureReason::Counter, 'The authenticator data counter is not greater than the previous counter.');
+        if ($authData->counter <= $previousCounter) {
+            throw new AssertionException(AssertionFailureReason::Counter, 'The authenticator data counter is not greater than the previous counter.');
         }
 
-        return $counter;
+        return $authData->counter;
     }
 
+    /**
+     * @psalm-capabilities read-props
+     */
     private static function pointOf(string $publicKeyPem): ?EcPoint
     {
-        if (preg_match('/^\\s*-----BEGIN PUBLIC KEY-----([A-Za-z0-9+\\/=\\s]+)-----END PUBLIC KEY-----\\s*$/D', $publicKeyPem, $matches) !== 1 || !isset($matches[1])) {
-            return null;
-        }
+        $der = Pem::tryDecode($publicKeyPem, Pem::PUBLIC_KEY);
 
-        $der = base64_decode($matches[1], true);
-
-        if ($der === false) {
-            return null;
-        }
-
-        try {
-            return ErrorGuard::call(static fn(): ?EcPoint => EcPoint::tryFromSubjectPublicKeyInfo($der));
-        } catch (Throwable) {
-            return null;
-        }
+        return $der === null ? null : EcPoint::tryFromSubjectPublicKeyInfo($der);
     }
 
     /**
      * The device signs the nonce itself with ECDSA over SHA-256, so the nonce is hashed once more here.
+     *
+     * @psalm-capabilities read-props
      */
     private static function isSignedBy(string $nonce, string $signature, EcPoint $point): bool
     {
-        try {
-            return ErrorGuard::call(static fn(): bool => openssl_verify($nonce, $signature, $point->publicKeyPem(), OPENSSL_ALGO_SHA256) === 1);
-        } catch (Throwable) {
-            return false;
-        }
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function counterOf(string $authenticatorData): int
-    {
-        $unpacked = unpack('N', $authenticatorData, self::COUNTER_OFFSET);
-
-        return $unpacked === false || !isset($unpacked[1]) || !is_int($unpacked[1]) ? 0 : $unpacked[1];
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function failure(AssertionFailureReason $reason, string $message): AssertionException
-    {
-        return new AssertionException($reason, $message);
+        return openssl_verify($nonce, $signature, $point->publicKeyPem(), OPENSSL_ALGO_SHA256) === 1;
     }
 }

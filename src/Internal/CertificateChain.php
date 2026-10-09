@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Oire\AppAttest\Internal;
 
 use DateTimeInterface;
+use LogicException;
 use Oire\AppAttest\TrustAnchor;
 use phpseclib3\File\X509;
 use Throwable;
@@ -32,7 +33,7 @@ use Throwable;
  * from the credential certificate.
  *
  * phpseclib does not check that an issuer is a CA, so the intermediate's basicConstraints are checked here,
- * and its fetching of caIssuers URLs is turned off: verification makes no network call.
+ * and its fetching of caIssuers URLs is turned off on every call: verification makes no network call.
  *
  * @internal
  */
@@ -52,6 +53,8 @@ final readonly class CertificateChain
      * The validated chain, or null if the certificates do not form one.
      *
      * @param list<string> $certificates DER, the credential certificate first
+     *
+     * @throws LogicException if the process has registered another phpseclib map for the nonce extension
      */
     public static function tryValidate(array $certificates, TrustAnchor $anchor, DateTimeInterface $time): ?self
     {
@@ -119,9 +122,8 @@ final readonly class CertificateChain
     private static function subjectPublicKeyInfoOf(X509 $credential): string
     {
         $pem = self::stringOrNull(self::member(self::member(self::member($credential->getCurrentCert(), 'tbsCertificate'), 'subjectPublicKeyInfo'), 'subjectPublicKey')) ?? '';
-        $der = base64_decode(preg_replace('/-----[A-Z ]+-----|\\s+/', '', $pem) ?? '', true);
 
-        return $der === false ? '' : $der;
+        return Pem::tryDecode($pem, Pem::PUBLIC_KEY) ?? '';
     }
 
     /**

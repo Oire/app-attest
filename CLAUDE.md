@@ -16,8 +16,17 @@ composer lint    # php-cs-fixer fix --dry-run --diff, then psalm --no-cache
 ```
 
 Without a local PHP: `docker compose run --rm php composer test` and
-`docker compose run --rm php composer lint` (PHP 8.5 CLI with gmp). Check PHP 8.3 too, for example in a
-`php:8.3-cli` container with gmp installed. Always run both commands before committing.
+`docker compose run --rm php composer lint` (PHP 8.5 CLI with gmp). Check PHP 8.3 too: the Dockerfile
+takes a `PHP_VERSION` build argument, and the stock `php:8.3-cli` image has neither gmp nor Composer.
+
+```bash
+docker build --build-arg PHP_VERSION=8.3 -t app-attest-php83 .
+docker run --rm -v "$PWD":/app app-attest-php83 composer test
+docker run --rm -v "$PWD":/app app-attest-php83 composer lint
+```
+
+Always run both commands on both versions before committing. If the local PHP lacks gmp, use Docker.
+Never regenerate the lock with `--ignore-platform-req` beyond `ext-gmp`.
 
 Psalm is pinned to `dev-master` and `config.platform.php` is 8.3.16, so CI and contributors run
 `composer install` from the lock, never `composer update`; Dependabot keeps the lock current.
@@ -37,6 +46,7 @@ resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
   *Test.php                 # Verifier, value, exception and trust anchor tests; Internal/ is tested through the verifiers
+  Internal/                 # ErrorGuardTest: the one internal class whose contract is tested directly
   Fixtures.php              # Loads golden vectors and their sidecars, with a MockClock at the vector's time
   Support/                  # Test-only AttestationBuilder, AssertionBuilder and helpers; never shipped
   fixtures/                 # Genuine vectors, byte-for-byte source copies, licenses, README with origins
@@ -64,6 +74,9 @@ tests/
 - Failures are exceptions with a typed `$reason`, never `false` or a bare message. Messages name the check
   and never echo key material. Caller errors (bad PEM, counter outside 0..2^32−1, invalid team or bundle
   id) are `InvalidArgumentException`, never an `AppAttestException`.
+- Psalm dev-master's purity model reports `MissingPureAnnotation` and `MissingImmutableAnnotation`.
+  Annotate as the issue suggests (`@psalm-pure`, `@psalm-immutable`, or `@psalm-capabilities read-props`
+  on methods and promoted constructors that read properties) and never suppress it.
 - LF line endings, American English, a final newline in every file, no whitespace on blank lines.
 
 ## Testing
@@ -84,9 +97,20 @@ tests/
   `authData` may carry bytes after the credential public key.
 - phpseclib does not check an intermediate's `basicConstraints` `cA` flag (`CertificateChain` does), fetches
   `caIssuers` URLs unless `X509::disableURLFetch()` is called, warns on malformed DER (hence
-  `ErrorGuard`), and keeps extension maps globally (hence one shared `Internal\NonceExtension`).
+  `ErrorGuard`), and keeps extension maps globally (hence one shared `Internal\NonceExtension`, whose
+  conflict with another registered map is a `LogicException`).
+- `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
+  previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
+  its own handler still reports warnings, so such a guard would be off in the whole suite.
 - The CBOR decoder keeps only strings, lists and maps, so an integer or a tag where a byte string belongs
   is `Format`.
 - Only a single uncompressed P-256 `PUBLIC KEY` PEM is accepted by `AssertionVerifier`, decoded by the
   library itself, so OpenSSL never reads a file path.
 - Before a release, re-fetch Apple's root and compare its fingerprint with `TrustAnchor::APPLE_ROOT_SHA256`.
+
+## Releasing
+
+Update `CHANGELOG.md`, re-fetch Apple's root and compare its fingerprint with
+`TrustAnchor::APPLE_ROOT_SHA256`, then push a `vX.Y.Z` tag. `release.yml` creates the GitHub Release with
+generated notes; it needs the tag to exist on GitHub (`--verify-tag`). Packagist updates through its
+GitHub webhook, not through the workflow.

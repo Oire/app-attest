@@ -82,6 +82,8 @@ let attestationToSend = base64Url(attestation.base64EncodedString())
 
 ## Registering a Key: Verifying an Attestation
 
+In the examples, `$logger` stands for your PSR-3 logger and `Response` for your framework's response class.
+
 ```php
 use Oire\AppAttest\AttestationVerifier;
 use Oire\AppAttest\Exception\AttestationException;
@@ -103,7 +105,9 @@ $clientDataHash = hash('sha256', $challenge, true);
 try {
     $key = $verifier->verify($attestation, $clientDataHash, $keyId, $app, [Environment::Production]);
 } catch (AttestationException $e) {
-    // Log $e->reason->name and $e->getMessage(), and refuse the registration
+    $logger->notice('App Attest attestation refused', ['reason' => $e->reason->name, 'message' => $e->getMessage()]);
+
+    return new Response('', 401);
 }
 
 // Store these for the key, indexed by the key id:
@@ -118,8 +122,8 @@ performs Apple's attestation steps in order:
 2. `x5c` holds exactly two certificates, the credential certificate and an intermediate. The intermediate
    is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, and all
    three are valid at the clock's time.
-3. The nonce, SHA-256(`authData` ‖ `clientDataHash`), equals the one inside the credential certificate's
-   extension `1.2.840.113635.100.8.2`.
+3. The nonce, the SHA-256 of `authData` followed by `clientDataHash`, equals the one inside the credential
+   certificate's extension `1.2.840.113635.100.8.2`.
 4. The SHA-256 of the credential certificate's public key (its raw 65-byte uncompressed point) equals
    `$keyId`.
 5. The `rpIdHash` in `authData` is the SHA-256 of your app id, `<team id>.<bundle id>`.
@@ -159,7 +163,9 @@ $stored = $keys->find($request['keyId']);
 try {
     $counter = (new AssertionVerifier())->verify($assertion, $clientData, $stored->publicKeyPem, $stored->counter, $app);
 } catch (AssertionException $e) {
-    // Log $e->reason->name and $e->getMessage(), and refuse the request
+    $logger->notice('App Attest assertion refused', ['reason' => $e->reason->name, 'message' => $e->getMessage()]);
+
+    return new Response('', 401);
 }
 
 // Now check that the challenge inside $clientData is one you issued, consume it,
@@ -170,9 +176,9 @@ try {
 performs Apple's assertion steps 1 to 5 and returns the new counter:
 
 1. The document is an object with a `signature` and an `authenticatorData` of at least 37 bytes.
-2. The signature is a valid ECDSA P-256 signature, with SHA-256, over the nonce
-   SHA-256(`authenticatorData` ‖ SHA-256(`$clientData`)). The device signs the nonce, so the nonce is
-   hashed once more by ECDSA itself.
+2. The signature is a valid ECDSA P-256 signature, with SHA-256, over the nonce: the SHA-256 of
+   `authenticatorData` followed by the SHA-256 of `$clientData`. The device signs the nonce, so the nonce
+   is hashed once more by ECDSA itself.
 3. The `rpIdHash` in `authenticatorData` is the SHA-256 of your app id.
 4. The counter in `authenticatorData` is strictly greater than `$previousCounter`.
 
@@ -236,9 +242,12 @@ cannot be mistaken for a forged request:
 * a `$previousCounter` outside 0 to 2^32 − 1;
 * a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate.
 
-`TrustAnchor::apple()`, which `AttestationVerifier` calls when you pass no trust anchor, throws a
-`LogicException` if the bundled Apple root is missing or does not match its pinned fingerprint: that is a
-broken installation, not a failed verification.
+A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
+
+* `TrustAnchor::apple()`, which `AttestationVerifier` calls when you pass no trust anchor, throws one if the
+  bundled Apple root is missing or does not match its pinned fingerprint;
+* `AttestationVerifier::verify()` throws one if your process has registered another phpseclib ASN.1 map for
+  the nonce extension, OID `1.2.840.113635.100.8.2` (see Using phpseclib Elsewhere in Your Application).
 
 ## What You Must Do Yourself
 
@@ -312,16 +321,21 @@ they affect every `X509` object in the same process, not only this library's:
   `X509::registerExtension()`, so phpseclib decodes that extension into an array for every certificate it
   loads.
 
-If your own code relies on phpseclib fetching issuer certificates, call `X509::enableURLFetch()` before it
-does so.
+Both happen on every call to `AttestationVerifier::verify()`, not once. If your own code relies on
+phpseclib fetching issuer certificates, call `X509::enableURLFetch()` again after each verification,
+before your code validates its own certificates.
+
+Do not register a map for `1.2.840.113635.100.8.2` yourself. If one other than the library's is already
+registered, phpseclib refuses the library's map, and `verify()` throws a `LogicException` that names the
+conflict instead of verifying.
 
 ## Testing Your Own Code
 
 To test code that calls `AssertionVerifier`, sign assertions yourself with a P-256 key, the way a device
 does: build a 37-byte `authenticatorData` (your app's `rpIdHash`, the flags byte `0x40` genuine assertions
-carry, which the verifier does not read, and the counter as a big-endian 32-bit integer), form the nonce
-SHA-256(`authenticatorData` ‖ SHA-256(`clientData`)), sign **the nonce** with ECDSA over SHA-256, and
-CBOR-encode the two members:
+carry, which the verifier does not read, and the counter as a big-endian 32-bit integer), form the nonce,
+the SHA-256 of `authenticatorData` followed by the SHA-256 of `clientData`, sign **the nonce** with ECDSA
+over SHA-256, and CBOR-encode the two members:
 
 ```php
 use CBOR\ByteStringObject;
@@ -350,8 +364,8 @@ $assertion = (string) MapObject::create()
 $counter = (new AssertionVerifier())->verify($assertion, $clientData, $publicKeyPem, $previousCounter, $app); // 1
 ```
 
-A signature over the bare `authenticatorData` ‖ SHA-256(`clientData`), without hashing it into the nonce
-first, is refused with `Signature`. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library
+A signature over the bare `authenticatorData` followed by the SHA-256 of `clientData`, without hashing
+them into the nonce first, is refused with `Signature`. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library
 already requires.
 
 Attestations are harder to make, because they need a certificate chain with the nonce extension. This
@@ -369,6 +383,8 @@ test code is not part of the Composer package.
   where `$allowed` is a list of `Environment` cases
 * `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app): int`
 * `TrustAnchor::apple(): TrustAnchor` and `TrustAnchor::fromPem(string $pem): TrustAnchor`
+* `TrustAnchor::APPLE_ROOT_SHA256`, the pinned fingerprint as lowercase hexadecimal, and
+  `TrustAnchor::$pem`, the root certificate as PEM
 * `SystemClock`, the PSR-20 clock used when none is passed
 
 `Oire\AppAttest\Value`:
@@ -379,10 +395,14 @@ test code is not part of the Composer package.
   and `rpIdHash(): string` (its SHA-256, raw bytes)
 * `Environment`, a string-backed enum with the cases `Production` (`'production'`) and `Development`
   (`'development'`), `aaguid(): string` and `Environment::tryFromAaguid(string $aaguid): ?Environment`
-* `AttestedKey`, described under Registering a Key
+* `AttestedKey::__construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt)`,
+  described under Registering a Key
 
 `Oire\AppAttest\Exception`: `AppAttestException`, `AttestationException`, `AttestationFailureReason`,
 `AssertionException` and `AssertionFailureReason`, described under Failures.
+
+Everything under `Oire\AppAttest\Internal`, and every member marked `@internal`, such as
+`TrustAnchor::fromPinnedPem()`, is not part of the public API and may change in any release.
 
 ## Development
 
@@ -399,6 +419,14 @@ extension:
 ```shell
 docker compose run --rm php composer test
 docker compose run --rm php composer lint
+```
+
+The same Dockerfile builds PHP 8.3, the lowest supported version:
+
+```shell
+docker build --build-arg PHP_VERSION=8.3 -t app-attest-php83 .
+docker run --rm -v "$PWD":/app app-attest-php83 composer test
+docker run --rm -v "$PWD":/app app-attest-php83 composer lint
 ```
 
 The tests verify genuine attestations and assertions signed by Apple, used byte for byte as the reference

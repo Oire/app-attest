@@ -29,8 +29,9 @@ namespace Oire\AppAttest\Tests\Support;
 final readonly class VectorOrigin
 {
     /**
-     * @param string $copyPath    absolute path of the byte-for-byte copy of the reference file
-     * @param string $licensePath absolute path of the reference's license beside the vectors
+     * @param string  $copyPath    absolute path of the byte-for-byte copy of the reference file
+     * @param string  $licensePath absolute path of the reference's license beside the vectors
+     * @param ?string $documentId  the id of the YAML document that holds the vector, if the copy is YAML
      *
      * @psalm-capabilities read-props
      */
@@ -40,5 +41,6 @@ final readonly class VectorOrigin
         public string $path,
         public string $copyPath,
         public string $licensePath,
+        public ?string $documentId,
     ) {}
 }

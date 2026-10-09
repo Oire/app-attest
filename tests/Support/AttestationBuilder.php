@@ -13,9 +13,7 @@ use CBOR\UnsignedIntegerObject;
 use DateTimeImmutable;
 use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Value\AppIdentity;
-use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
-use Oire\AppAttest\Value\TeamId;
 use phpseclib3\Crypt\Common\PrivateKey;
 use phpseclib3\Crypt\Common\PublicKey;
 use phpseclib3\Crypt\PublicKeyLoader;
@@ -48,7 +46,7 @@ final class AttestationBuilder
 {
     public const string DEFAULT_TIME = '2026-01-15T12:00:00Z';
     public const string RECEIPT = 'oire-test-receipt';
-    private const string FORMAT = 'apple-appattest';
+    public const string FORMAT = 'apple-appattest';
     private const int FLAGS = 0x40;
     private AppIdentity $app;
     private string $clientDataHash;
@@ -63,10 +61,13 @@ final class AttestationBuilder
     private string $format = self::FORMAT;
     private bool $certificates = true;
     private ?int $authDataLength = null;
+    private ?string $credentialPublicKeyPem = null;
+    private bool $rootExpired = false;
+    private ?string $unlistedIssuerUrl = null;
 
     private function __construct()
     {
-        $this->app = new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.app'));
+        $this->app = TestApp::identity();
         $this->clientDataHash = hash('sha256', 'challenge', true);
         $this->time = new DateTimeImmutable(self::DEFAULT_TIME);
         $this->aaguid = Environment::Development->aaguid();
@@ -199,6 +200,42 @@ final class AttestationBuilder
     }
 
     /**
+     * A credential certificate for another public key than the one authData and the key id are made from,
+     * such as an RSA or a P-384 key.
+     */
+    public function withCredentialPublicKeyPem(string $publicKeyPem): self
+    {
+        $builder = clone $this;
+        $builder->credentialPublicKeyPem = $publicKeyPem;
+
+        return $builder;
+    }
+
+    /**
+     * A root that expired the day before the builder's time, while the intermediate and the credential
+     * certificate are still valid.
+     */
+    public function withExpiredRoot(): self
+    {
+        $builder = clone $this;
+        $builder->rootExpired = true;
+
+        return $builder;
+    }
+
+    /**
+     * A credential certificate issued by a CA the chain does not hold, pointing to it with an
+     * authorityInfoAccess caIssuers URL.
+     */
+    public function withCredentialFromAnUnlistedIssuer(string $caIssuersUrl): self
+    {
+        $builder = clone $this;
+        $builder->unlistedIssuerUrl = $caIssuersUrl;
+
+        return $builder;
+    }
+
+    /**
      * The DER of the nonce extension's value for a nonce.
      *
      * @psalm-pure
@@ -222,25 +259,46 @@ final class AttestationBuilder
 
         $rootDn = ['id-at-commonName' => 'Oire Test App Attestation Root CA'];
         $intermediateDn = ['id-at-commonName' => 'Oire Test App Attestation CA'];
-        $rootDer = self::certificate($rootDn, $rootKey, $rootDn, $rootKey, true, $this->time->modify('-1 year'), $this->time->modify('+10 years'));
+        $rootDer = self::certificate(
+            $rootDn,
+            $rootKey->publicKeyPem,
+            $rootDn,
+            $rootKey,
+            true,
+            $this->time->modify($this->rootExpired ? '-2 years' : '-1 year'),
+            $this->time->modify($this->rootExpired ? '-1 day' : '+10 years'),
+        );
         $intermediateDer = self::certificate(
             $intermediateDn,
-            $intermediateKey,
+            $intermediateKey->publicKeyPem,
             $rootDn,
             $rootKey,
             $this->intermediateIsCa,
             $this->time->modify('-1 year'),
             $this->time->modify('+5 years'),
         );
+        $credentialExtensions = [];
+
+        if ($this->nonceExtension) {
+            $credentialExtensions[NonceExtension::OID] = new Element($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce));
+        }
+
+        if ($this->unlistedIssuerUrl !== null) {
+            $credentialExtensions['id-pe-authorityInfoAccess'] = [[
+                'accessMethod' => 'id-ad-caIssuers',
+                'accessLocation' => ['uniformResourceIdentifier' => $this->unlistedIssuerUrl],
+            ]];
+        }
+
         $credentialDer = self::certificate(
             ['id-at-commonName' => bin2hex($keyId)],
-            $credentialKey,
-            $intermediateDn,
-            $intermediateKey,
+            $this->credentialPublicKeyPem ?? $credentialKey->publicKeyPem,
+            $this->unlistedIssuerUrl === null ? $intermediateDn : ['id-at-commonName' => 'Oire Test Unlisted CA'],
+            $this->unlistedIssuerUrl === null ? $intermediateKey : EcKey::generate(),
             false,
             $this->time->modify('-1 day'),
             $this->time->modify('+1 day'),
-            $this->nonceExtension ? $this->nonceExtensionDer ?? self::nonceExtensionDer($nonce) : null,
+            $credentialExtensions,
         );
 
         $attStmt = MapObject::create();
@@ -271,7 +329,7 @@ final class AttestationBuilder
             $this->app,
             $authData,
             self::RECEIPT,
-            self::pem($rootDer),
+            Pem::fromDer($rootDer, Pem::CERTIFICATE),
             $intermediateDer,
             $credentialDer,
             $this->time,
@@ -298,20 +356,21 @@ final class AttestationBuilder
     }
 
     /**
-     * @param array<string, string> $subjectDn
-     * @param array<string, string> $issuerDn
+     * @param array<string, string>                          $subjectDn
+     * @param array<string, string>                          $issuerDn
+     * @param array<string, Element|array<array-key, mixed>> $extensions values by extension id
      */
     private static function certificate(
         array $subjectDn,
-        EcKey $subjectKey,
+        string $subjectPublicKeyPem,
         array $issuerDn,
         EcKey $issuerKey,
         bool $ca,
         DateTimeImmutable $notBefore,
         DateTimeImmutable $notAfter,
-        ?string $nonceExtensionDer = null,
+        array $extensions = [],
     ): string {
-        $publicKey = PublicKeyLoader::loadPublicKey($subjectKey->publicKeyPem);
+        $publicKey = PublicKeyLoader::loadPublicKey($subjectPublicKeyPem);
         $privateKey = PublicKeyLoader::loadPrivateKey($issuerKey->privateKeyPem);
 
         if (!$publicKey instanceof PublicKey || !$privateKey instanceof PrivateKey) {
@@ -334,8 +393,8 @@ final class AttestationBuilder
             $certificate->makeCA();
         }
 
-        if ($nonceExtensionDer !== null) {
-            $certificate->setExtensionValue(NonceExtension::OID, new Element($nonceExtensionDer));
+        foreach ($extensions as $id => $value) {
+            $certificate->setExtensionValue($id, $value);
         }
 
         return self::der($certificate, $certificate->sign($issuer, $subject));
@@ -350,13 +409,5 @@ final class AttestationBuilder
         }
 
         return $der;
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function pem(string $der): string
-    {
-        return "-----BEGIN CERTIFICATE-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END CERTIFICATE-----\n";
     }
 }

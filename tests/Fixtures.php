@@ -70,6 +70,11 @@ final class Fixtures
         return self::attestations()[$name] ?? throw new UnexpectedValueException('No attestation vector named ' . $name . '.');
     }
 
+    public static function assertion(string $name): AssertionVector
+    {
+        return self::assertions()[$name] ?? throw new UnexpectedValueException('No assertion vector named ' . $name . '.');
+    }
+
     /**
      * @return array<string, array<array-key, mixed>>
      */
@@ -184,6 +189,7 @@ final class Fixtures
             self::string($origin, 'path'),
             self::DIRECTORY . '/' . self::string($origin, 'copy'),
             self::DIRECTORY . '/' . self::string($origin, 'license'),
+            isset($origin['documentId']) ? self::string($origin, 'documentId') : null,
         );
     }
 

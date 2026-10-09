@@ -1,4 +1,6 @@
-FROM php:8.5-cli
+ARG PHP_VERSION=8.5
+
+FROM php:${PHP_VERSION}-cli
 
 COPY --from=mlocati/php-extension-installer /usr/bin/install-php-extensions /usr/local/bin/
 

@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Oire\AppAttest;
+namespace Oire\AppAttest\Tests\Support;
 
-use DateTimeImmutable;
-use Override;
-use Psr\Clock\ClockInterface;
+use Oire\AppAttest\Value\AppIdentity;
+use Oire\AppAttest\Value\BundleId;
+use Oire\AppAttest\Value\TeamId;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -26,15 +26,20 @@ use Psr\Clock\ClockInterface;
  */
 
 /**
- * The PSR-20 clock used when the caller passes none: the current system time.
+ * The app the builders make attestations and assertions for unless told otherwise.
  *
- * @psalm-api
+ * @psalm-pure
  */
-final readonly class SystemClock implements ClockInterface
+final class TestApp
 {
-    #[Override]
-    public function now(): DateTimeImmutable
+    public const string TEAM_ID = 'ABCDE12345';
+    public const string BUNDLE_ID = 'com.example.app';
+
+    /**
+     * @psalm-pure
+     */
+    public static function identity(): AppIdentity
     {
-        return new DateTimeImmutable();
+        return new AppIdentity(new TeamId(self::TEAM_ID), new BundleId(self::BUNDLE_ID));
     }
 }

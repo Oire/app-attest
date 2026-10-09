@@ -7,6 +7,9 @@ namespace Oire\AppAttest\Tests;
 use CBOR\ByteStringObject;
 use CBOR\CBORObject;
 use CBOR\Decoder;
+use CBOR\IndefiniteLengthByteStringObject;
+use CBOR\IndefiniteLengthMapObject;
+use CBOR\IndefiniteLengthTextStringObject;
 use CBOR\ListObject;
 use CBOR\MapObject;
 use CBOR\Normalizable;
@@ -20,14 +23,18 @@ use Oire\AppAttest\Exception\AssertionFailureReason;
 use Oire\AppAttest\Tests\Support\AssertionBuilder;
 use Oire\AppAttest\Tests\Support\AssertionParts;
 use Oire\AppAttest\Tests\Support\AssertionVector;
+use Oire\AppAttest\Tests\Support\AuthDataLayout;
+use Oire\AppAttest\Tests\Support\Damage;
+use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
+use Oire\AppAttest\Tests\Support\Pem;
+use Oire\AppAttest\Tests\Support\TestApp;
 use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\TeamId;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use RuntimeException;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -48,33 +55,32 @@ use RuntimeException;
 final class AssertionVerifierTest extends TestCase
 {
     private const string CLIENT_DATA = '{"challenge":"c2luZ2xlLXVzZQ","action":"test"}';
-    private const string P256_SPKI_PREFIX = "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
     private const string MUTATED_VECTOR = 'veehaitch-ios-14.4';
     private const int MAX_COUNTER = 0xFFFFFFFF;
 
     /**
      * @return iterable<string, array{AssertionVector}>
      */
-    public static function genuineVectors(): iterable
+    public static function provideGenuineVectors(): iterable
     {
         foreach (Fixtures::assertions() as $name => $vector) {
             yield $name => [$vector];
         }
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testGenuineVectorIsAcceptedWithItsCounter(AssertionVector $vector): void
     {
         self::assertSame($vector->expectedCounter, self::verifyVector($vector));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherClientDataFailsTheSignature(AssertionVector $vector): void
     {
         self::assertFailure(AssertionFailureReason::Signature, static fn() => self::verifyVector($vector, clientData: $vector->clientData . 'x'));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAForeignKeyFailsTheSignature(AssertionVector $vector): void
     {
         $foreignKey = AssertionBuilder::create()->publicKeyPem();
@@ -82,7 +88,7 @@ final class AssertionVerifierTest extends TestCase
         self::assertFailure(AssertionFailureReason::Signature, static fn() => self::verifyVector($vector, publicKeyPem: $foreignKey));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherAppFailsTheRpIdHash(AssertionVector $vector): void
     {
         $app = new AppIdentity(new TeamId($vector->teamId), new BundleId($vector->bundleId . '.other'));
@@ -90,14 +96,14 @@ final class AssertionVerifierTest extends TestCase
         self::assertFailure(AssertionFailureReason::RpIdHash, static fn() => self::verifyVector($vector, app: $app));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testCounterNotAboveThePreviousOneFails(AssertionVector $vector): void
     {
         self::assertFailure(AssertionFailureReason::Counter, static fn() => self::verifyVector($vector, previousCounter: $vector->expectedCounter));
         self::assertFailure(AssertionFailureReason::Counter, static fn() => self::verifyVector($vector, previousCounter: $vector->expectedCounter + 1));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testVectorKeyAsAttestedIsAccepted(AssertionVector $vector): void
     {
         $attested = Fixtures::attestation($vector->attestation);
@@ -132,7 +138,7 @@ final class AssertionVerifierTest extends TestCase
 
     public function testBuiltAssertionForAnotherBundleFailsTheRpIdHash(): void
     {
-        $builder = AssertionBuilder::create()->withApp(new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.other')));
+        $builder = AssertionBuilder::create()->withApp(new AppIdentity(new TeamId(TestApp::TEAM_ID), new BundleId('com.example.other')));
 
         self::assertFailure(AssertionFailureReason::RpIdHash, static fn() => self::verifyBuilt($builder));
     }
@@ -147,15 +153,15 @@ final class AssertionVerifierTest extends TestCase
     /**
      * @return iterable<string, array{callable(AssertionParts): string}>
      */
-    public static function tamperedAssertions(): iterable
+    public static function provideTamperedAssertions(): iterable
     {
         yield 'flipped signature byte' => [static fn(AssertionParts $a): string => self::assertionObject(
-            ByteStringObject::create(self::flipped($a->signature, mb_strlen($a->signature, '8bit') - 1)),
+            ByteStringObject::create(Damage::flipped($a->signature, mb_strlen($a->signature, '8bit') - 1, 0x01)),
             ByteStringObject::create($a->authenticatorData),
         )];
         yield 'flipped authenticatorData flags' => [static fn(AssertionParts $a): string => self::assertionObject(
             ByteStringObject::create($a->signature),
-            ByteStringObject::create(self::flipped($a->authenticatorData, 32)),
+            ByteStringObject::create(Damage::flipped($a->authenticatorData, AuthDataLayout::FLAGS_OFFSET, 0x01)),
         )];
         yield 'truncated signature' => [static fn(AssertionParts $a): string => self::assertionObject(
             ByteStringObject::create(mb_substr($a->signature, 0, 20, '8bit')),
@@ -171,14 +177,14 @@ final class AssertionVerifierTest extends TestCase
         )];
         yield 'raised counter' => [static fn(AssertionParts $a): string => self::assertionObject(
             ByteStringObject::create($a->signature),
-            ByteStringObject::create(mb_substr($a->authenticatorData, 0, 33, '8bit') . pack('N', 1000)),
+            ByteStringObject::create(mb_substr($a->authenticatorData, 0, AuthDataLayout::COUNTER_OFFSET, '8bit') . pack('N', 1000)),
         )];
     }
 
     /**
      * @param callable(AssertionParts): string $tamper
      */
-    #[DataProvider('tamperedAssertions')]
+    #[DataProvider('provideTamperedAssertions')]
     public function testTamperedAssertionFailsTheSignature(callable $tamper): void
     {
         $builder = AssertionBuilder::create();
@@ -190,7 +196,7 @@ final class AssertionVerifierTest extends TestCase
     public function testSignatureOverTheUnhashedNonceInputFails(): void
     {
         $key = EcKey::generate();
-        $authenticatorData = self::app()->rpIdHash() . "\x40" . pack('N', 1);
+        $authenticatorData = TestApp::identity()->rpIdHash() . "\x40" . pack('N', 1);
         $signed = openssl_sign($authenticatorData . hash('sha256', self::CLIENT_DATA, true), $signature, $key->privateKeyPem, OPENSSL_ALGO_SHA256);
         self::assertTrue($signed);
         $cbor = self::assertionObject(ByteStringObject::create($signature), ByteStringObject::create($authenticatorData));
@@ -210,14 +216,14 @@ final class AssertionVerifierTest extends TestCase
     /**
      * @return iterable<string, array{callable(AssertionParts): string}>
      */
-    public static function malformedDocuments(): iterable
+    public static function provideMalformedDocuments(): iterable
     {
         yield 'no signature' => [static fn(AssertionParts $a): string => self::assertionObject(null, ByteStringObject::create($a->authenticatorData))];
         yield 'no authenticatorData' => [static fn(AssertionParts $a): string => self::assertionObject(ByteStringObject::create($a->signature), null)];
         yield 'empty authenticatorData' => [static fn(AssertionParts $a): string => self::assertionObject(ByteStringObject::create($a->signature), ByteStringObject::create(''))];
-        yield '36 bytes of authenticatorData' => [static fn(AssertionParts $a): string => self::assertionObject(
+        yield 'one byte short of authenticatorData' => [static fn(AssertionParts $a): string => self::assertionObject(
             ByteStringObject::create($a->signature),
-            ByteStringObject::create(mb_substr($a->authenticatorData, 0, 36, '8bit')),
+            ByteStringObject::create(mb_substr($a->authenticatorData, 0, AuthDataLayout::ASSERTION_LENGTH - 1, '8bit')),
         )];
         yield 'signature an integer' => [static fn(AssertionParts $a): string => self::assertionObject(UnsignedIntegerObject::create(1), ByteStringObject::create($a->authenticatorData))];
         yield 'authenticatorData a list' => [static fn(AssertionParts $a): string => self::assertionObject(
@@ -235,7 +241,7 @@ final class AssertionVerifierTest extends TestCase
     /**
      * @param callable(AssertionParts): string $document
      */
-    #[DataProvider('malformedDocuments')]
+    #[DataProvider('provideMalformedDocuments')]
     public function testMalformedDocumentFails(callable $document): void
     {
         $builder = AssertionBuilder::create();
@@ -247,16 +253,16 @@ final class AssertionVerifierTest extends TestCase
     /**
      * @return iterable<string, array{string}>
      */
-    public static function garbage(): iterable
+    public static function provideGarbage(): iterable
     {
         yield 'empty' => [''];
         yield 'text' => ['garbage'];
         yield 'bytes' => [str_repeat(hash('sha512', 'garbage', true), 4)];
         yield 'a list' => [(string) ListObject::create([TextStringObject::create('signature')])];
-        yield 'a byte string' => [(string) ByteStringObject::create(str_repeat("\x01", 37))];
+        yield 'a byte string' => [(string) ByteStringObject::create(str_repeat("\x01", AuthDataLayout::ASSERTION_LENGTH))];
     }
 
-    #[DataProvider('garbage')]
+    #[DataProvider('provideGarbage')]
     public function testGarbageIsMalformed(string $cbor): void
     {
         self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt(AssertionBuilder::create(), cbor: $cbor));
@@ -264,39 +270,32 @@ final class AssertionVerifierTest extends TestCase
 
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
-        $vector = Fixtures::assertions()[self::MUTATED_VECTOR] ?? throw new RuntimeException('No assertion vector named ' . self::MUTATED_VECTOR . '.');
-        $bytes = $vector->bytes;
-        $length = mb_strlen($bytes, '8bit');
-        $damaged = [];
+        $vector = Fixtures::assertion(self::MUTATED_VECTOR);
+        $outcomes = Damage::withoutPhpErrors(static fn(): array => array_map(
+            static fn(Damaged $d): string => self::outcomeOf($vector, $d->bytes),
+            Damage::of($vector->bytes),
+        ));
 
-        for ($offset = 0; $offset < $length; ++$offset) {
-            $damaged[] = mb_substr($bytes, 0, $offset, '8bit');
-            $damaged[] = mb_substr($bytes, 0, $offset, '8bit') . chr(ord($bytes[$offset]) ^ 0xFF) . mb_substr($bytes, $offset + 1, null, '8bit');
-        }
-
-        $errors = [];
-        set_error_handler(static function(int $severity, string $message) use (&$errors): bool {
-            $errors[] = $severity . ': ' . $message;
-
-            return true;
-        });
-
-        try {
-            $outcomes = array_map(static fn(string $cbor): string => self::outcomeOf($vector, $cbor), $damaged);
-        } finally {
-            restore_error_handler();
-        }
-
-        self::assertSame([], $errors);
         self::assertNotContains('accepted', $outcomes);
         self::assertContains(AssertionFailureReason::Format->name, $outcomes);
         self::assertContains(AssertionFailureReason::Signature->name, $outcomes);
     }
 
+    public function testIndefiniteLengthEncodingIsAccepted(): void
+    {
+        $builder = AssertionBuilder::create();
+        $parts = self::partsOf($builder->build(self::CLIENT_DATA));
+        $cbor = (string) IndefiniteLengthMapObject::create()
+            ->add(IndefiniteLengthTextStringObject::create('sig', 'nature'), IndefiniteLengthByteStringObject::create(...mb_str_split($parts->signature, 16, '8bit')))
+            ->add(TextStringObject::create('authenticatorData'), IndefiniteLengthByteStringObject::create(...mb_str_split($parts->authenticatorData, 16, '8bit')));
+
+        self::assertSame(1, self::verifyBuilt($builder, cbor: $cbor));
+    }
+
     /**
      * @return iterable<string, array{string}>
      */
-    public static function invalidPublicKeys(): iterable
+    public static function provideInvalidPublicKeys(): iterable
     {
         yield 'empty' => [''];
         yield 'garbage' => ['garbage'];
@@ -305,14 +304,16 @@ final class AssertionVerifierTest extends TestCase
         yield 'empty body' => ["-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----\n"];
         yield 'a certificate' => [TrustAnchor::apple()->pem];
         yield 'a private key' => [EcKey::generate()->privateKeyPem];
-        yield 'an RSA key' => [self::generatedPublicKeyPem(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048])];
-        yield 'a P-384 key' => [self::generatedPublicKeyPem(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp384r1'])];
-        yield 'a point off the curve' => [self::pem(self::P256_SPKI_PREFIX . "\x04" . str_repeat("\x01", 64))];
-        yield 'a compressed point' => [self::pem("\x30\x39\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x22\x00\x02" . str_repeat("\x01", 32))];
+        yield 'an RSA key' => [Pem::generatedPublicKey(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048])];
+        yield 'a P-384 key' => [Pem::generatedPublicKey(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp384r1'])];
+        yield 'a point off the curve' => [self::publicKeyPem(EcKey::P256_SPKI_PREFIX . "\x04" . str_repeat("\x01", 64))];
+        yield 'a hybrid point with an even y' => [EcKey::generate()->publicKeyPemWithPrefix("\x06")];
+        yield 'a hybrid point with an odd y' => [EcKey::generate()->publicKeyPemWithPrefix("\x07")];
+        yield 'a compressed point' => [self::publicKeyPem("\x30\x39\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x22\x00\x02" . str_repeat("\x01", 32))];
         yield 'two keys' => [EcKey::generate()->publicKeyPem . EcKey::generate()->publicKeyPem];
     }
 
-    #[DataProvider('invalidPublicKeys')]
+    #[DataProvider('provideInvalidPublicKeys')]
     public function testInvalidPublicKeyIsACallerError(string $publicKeyPem): void
     {
         $builder = AssertionBuilder::create();
@@ -333,7 +334,7 @@ final class AssertionVerifierTest extends TestCase
      *
      * @psalm-capabilities read-props
      */
-    public static function invalidPreviousCounters(): iterable
+    public static function provideInvalidPreviousCounters(): iterable
     {
         yield 'negative' => [-1];
         yield 'above 2^32 - 1' => [self::MAX_COUNTER + 1];
@@ -341,7 +342,7 @@ final class AssertionVerifierTest extends TestCase
         yield 'the largest integer' => [PHP_INT_MAX];
     }
 
-    #[DataProvider('invalidPreviousCounters')]
+    #[DataProvider('provideInvalidPreviousCounters')]
     public function testPreviousCounterOutOfRangeIsACallerError(int $previousCounter): void
     {
         $builder = AssertionBuilder::create();
@@ -350,10 +351,16 @@ final class AssertionVerifierTest extends TestCase
         self::verifyBuilt($builder, previousCounter: $previousCounter);
     }
 
-    public function testCallerErrorsComeBeforeVerification(): void
+    public function testAnInvalidPublicKeyIsReportedBeforeTheAssertionIsRead(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        (new AssertionVerifier())->verify('garbage', self::CLIENT_DATA, 'garbage', 0, self::app());
+        (new AssertionVerifier())->verify('garbage', self::CLIENT_DATA, 'garbage', 0, TestApp::identity());
+    }
+
+    public function testAnInvalidPreviousCounterIsReportedBeforeTheAssertionIsRead(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        (new AssertionVerifier())->verify('garbage', self::CLIENT_DATA, AssertionBuilder::create()->publicKeyPem(), -1, TestApp::identity());
     }
 
     private static function verifyVector(
@@ -380,7 +387,7 @@ final class AssertionVerifierTest extends TestCase
             self::CLIENT_DATA,
             $publicKeyPem ?? $builder->publicKeyPem(),
             $previousCounter,
-            self::app(),
+            TestApp::identity(),
         );
     }
 
@@ -409,14 +416,6 @@ final class AssertionVerifierTest extends TestCase
         } catch (AssertionException $e) {
             return $e->reason->name;
         }
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function app(): AppIdentity
-    {
-        return new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.app'));
     }
 
     private static function partsOf(string $cbor): AssertionParts
@@ -451,34 +450,8 @@ final class AssertionVerifierTest extends TestCase
     /**
      * @psalm-pure
      */
-    private static function flipped(string $bytes, int $offset): string
+    private static function publicKeyPem(string $der): string
     {
-        return mb_substr($bytes, 0, $offset, '8bit') . chr(ord($bytes[$offset]) ^ 0x01) . mb_substr($bytes, $offset + 1, null, '8bit');
-    }
-
-    /**
-     * @param array<string, int|string> $options
-     *
-     * @psalm-pure
-     */
-    private static function generatedPublicKeyPem(array $options): string
-    {
-        $key = openssl_pkey_new($options);
-        $details = $key === false ? false : openssl_pkey_get_details($key);
-        $pem = is_array($details) ? $details['key'] ?? null : null;
-
-        if (!is_string($pem)) {
-            throw new RuntimeException('Cannot generate the test key.');
-        }
-
-        return $pem;
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function pem(string $der): string
-    {
-        return "-----BEGIN PUBLIC KEY-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END PUBLIC KEY-----\n";
+        return Pem::fromDer($der, Pem::PUBLIC_KEY);
     }
 }

@@ -8,8 +8,6 @@ use CBOR\ByteStringObject;
 use CBOR\MapObject;
 use CBOR\TextStringObject;
 use Oire\AppAttest\Value\AppIdentity;
-use Oire\AppAttest\Value\BundleId;
-use Oire\AppAttest\Value\TeamId;
 use RuntimeException;
 
 /**
@@ -30,7 +28,7 @@ use RuntimeException;
  */
 
 /**
- * Makes assertions the way a device does: signs the nonce SHA-256(authenticatorData ‖ SHA-256(clientData)) with
+ * Makes assertions the way a device does: signs the nonce the SHA-256 of authenticatorData followed by SHA-256(clientData) with
  * ECDSA P-256 over SHA-256 and CBOR-encodes {signature, authenticatorData}. Test code only, never shipped.
  */
 final class AssertionBuilder
@@ -44,7 +42,7 @@ final class AssertionBuilder
      */
     private function __construct(private readonly EcKey $key)
     {
-        $this->app = new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.app'));
+        $this->app = TestApp::identity();
     }
 
     /**

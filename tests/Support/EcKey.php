@@ -30,8 +30,12 @@ use RuntimeException;
  */
 final readonly class EcKey
 {
-    private const int SPKI_LENGTH = 91;
-    private const int POINT_LENGTH = 65;
+    /**
+     * SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING (66 bytes, no unused bits) }.
+     */
+    public const string P256_SPKI_PREFIX = "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
+    public const int SPKI_LENGTH = 91;
+    public const int POINT_LENGTH = 65;
 
     /**
      * @param string $point the uncompressed EC point: 0x04, then x and y, 32 bytes each
@@ -62,9 +66,9 @@ final readonly class EcKey
         }
 
         $publicKeyPem = $details['key'];
-        $spki = base64_decode(preg_replace('/-----[A-Z ]+-----|\\s+/', '', $publicKeyPem) ?? '', true);
+        $spki = Pem::toDer($publicKeyPem);
 
-        if (!is_string($spki) || mb_strlen($spki, '8bit') !== self::SPKI_LENGTH) {
+        if (mb_strlen($spki, '8bit') !== self::SPKI_LENGTH) {
             throw new RuntimeException('The generated key is not an uncompressed P-256 key.');
         }
 
@@ -83,6 +87,16 @@ final readonly class EcKey
         } while ($key->point[1] !== "\x00");
 
         return $key;
+    }
+
+    /**
+     * The public key as a SubjectPublicKeyInfo whose point starts with another prefix byte than 0x04.
+     *
+     * @psalm-capabilities read-props
+     */
+    public function publicKeyPemWithPrefix(string $prefix): string
+    {
+        return Pem::fromDer(self::P256_SPKI_PREFIX . $prefix . mb_substr($this->point, 1, null, '8bit'), Pem::PUBLIC_KEY);
     }
 
     /**

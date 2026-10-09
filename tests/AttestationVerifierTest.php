@@ -7,26 +7,41 @@ namespace Oire\AppAttest\Tests;
 use CBOR\ByteStringObject;
 use CBOR\CBORObject;
 use CBOR\Decoder;
+use CBOR\IndefiniteLengthByteStringObject;
+use CBOR\IndefiniteLengthListObject;
+use CBOR\IndefiniteLengthMapObject;
+use CBOR\IndefiniteLengthTextStringObject;
 use CBOR\ListObject;
 use CBOR\MapObject;
 use CBOR\Normalizable;
 use CBOR\StringStream;
 use CBOR\TextStringObject;
 use CBOR\UnsignedIntegerObject;
+use DateTimeImmutable;
+use LogicException;
 use Oire\AppAttest\AttestationVerifier;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
+use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Tests\Support\AttestationBuilder;
 use Oire\AppAttest\Tests\Support\AttestationVector;
 use Oire\AppAttest\Tests\Support\BuiltAttestation;
+use Oire\AppAttest\Tests\Support\Damage;
+use Oire\AppAttest\Tests\Support\Damaged;
+use Oire\AppAttest\Tests\Support\EcKey;
+use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\AttestedKey;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
 use Oire\AppAttest\Value\TeamId;
+use Override;
+use phpseclib3\File\ASN1;
+use phpseclib3\File\X509;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Clock\ClockInterface;
+use ReflectionProperty;
 use Symfony\Component\Clock\MockClock;
 
 /**
@@ -47,20 +62,26 @@ use Symfony\Component\Clock\MockClock;
  */
 final class AttestationVerifierTest extends TestCase
 {
-    private const string FORMAT = 'apple-appattest';
     private const string MUTATED_VECTOR = 'veehaitch-ios-14.4';
 
     /**
      * @return iterable<string, array{AttestationVector}>
      */
-    public static function genuineVectors(): iterable
+    public static function provideGenuineVectors(): iterable
     {
         foreach (Fixtures::attestations() as $name => $vector) {
             yield $name => [$vector];
         }
     }
 
-    #[DataProvider('genuineVectors')]
+    #[Override]
+    protected function tearDown(): void
+    {
+        X509::setURLFetchCallback(null);
+        X509::disableURLFetch();
+    }
+
+    #[DataProvider('provideGenuineVectors')]
     public function testGenuineVectorIsAccepted(AttestationVector $vector): void
     {
         $key = self::verifyVector($vector);
@@ -72,19 +93,19 @@ final class AttestationVerifierTest extends TestCase
         self::assertSame($vector->expectedCounter, $key->counter);
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherClientDataHashFailsTheNonce(AttestationVector $vector): void
     {
         self::assertFailure(AttestationFailureReason::Nonce, static fn() => self::verifyVector($vector, clientDataHash: hash('sha256', 'another challenge', true)));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherKeyIdFails(AttestationVector $vector): void
     {
         self::assertFailure(AttestationFailureReason::KeyId, static fn() => self::verifyVector($vector, keyId: hash('sha256', 'another key', true)));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherAppFailsTheRpIdHash(AttestationVector $vector): void
     {
         $app = new AppIdentity(new TeamId($vector->teamId), new BundleId($vector->bundleId . '.other'));
@@ -92,7 +113,7 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::RpIdHash, static fn() => self::verifyVector($vector, app: $app));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testEnvironmentNotAllowedFails(AttestationVector $vector): void
     {
         $other = $vector->environment === Environment::Production ? Environment::Development : Environment::Production;
@@ -101,7 +122,7 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::Environment, static fn() => self::verifyVector($vector, allowed: []));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testChainOutsideItsValidityFails(AttestationVector $vector): void
     {
         $after = new MockClock($vector->verifyAt->modify('+1 year'));
@@ -111,7 +132,7 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyVector($vector, clock: $before));
     }
 
-    #[DataProvider('genuineVectors')]
+    #[DataProvider('provideGenuineVectors')]
     public function testAnotherTrustAnchorFailsTheChain(AttestationVector $vector): void
     {
         $verifier = new AttestationVerifier(AttestationBuilder::create()->build()->trustAnchor(), $vector->clock());
@@ -122,15 +143,22 @@ final class AttestationVerifierTest extends TestCase
         );
     }
 
-    public function testDefaultsAreTheAppleRootAndTheSystemClock(): void
+    public function testDefaultClockIsTheSystemClock(): void
     {
-        $vector = Fixtures::attestation('takimoto3-apple-guide');
-        $verifier = new AttestationVerifier();
+        $now = new DateTimeImmutable();
+        $current = AttestationBuilder::create()
+            ->withTime($now)
+            ->build();
 
-        self::assertFailure(
-            AttestationFailureReason::CertificateChain,
-            static fn() => $verifier->verify($vector->bytes, $vector->clientDataHash, $vector->keyId, $vector->app(), Environment::cases()),
-        );
+        self::assertSame($current->keyId, self::verifyWithTheDefaultClock($current)->keyId);
+
+        foreach (['-1 week', '+1 week'] as $shift) {
+            $other = AttestationBuilder::create()
+                ->withTime($now->modify($shift))
+                ->build();
+
+            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyWithTheDefaultClock($other));
+        }
     }
 
     public function testGuideVectorWithRawChallengeAndNewerExtensionsIsAccepted(): void
@@ -200,6 +228,71 @@ final class AttestationVerifierTest extends TestCase
         self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
     }
 
+    public function testExpiredRootFailsTheChain(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExpiredRoot()
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+    }
+
+    public function testCaIssuersUrlIsNeverFetched(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
+            ->build();
+        $fetched = [];
+        X509::enableURLFetch();
+        X509::setURLFetchCallback(static function(string $host) use (&$fetched): bool {
+            $fetched[] = $host;
+
+            return false;
+        });
+
+        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+        self::assertSame([], $fetched);
+    }
+
+    public function testAnotherNonceExtensionMapIsALogicException(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $extensions = new ReflectionProperty(X509::class, 'extensions');
+        $registered = (array) $extensions->getValue();
+        $extensions->setValue(null, [NonceExtension::OID => ['type' => ASN1::TYPE_OCTET_STRING]] + $registered);
+
+        try {
+            $this->expectException(LogicException::class);
+            self::verifyBuilt($attestation);
+        } finally {
+            $extensions->setValue(null, $registered);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{array<string, int|string>}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideCredentialKeysOtherThanP256(): iterable
+    {
+        yield 'P-384' => [['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp384r1']];
+        yield 'RSA' => [['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]];
+    }
+
+    /**
+     * @param array<string, int|string> $options
+     */
+    #[DataProvider('provideCredentialKeysOtherThanP256')]
+    public function testCredentialKeyOtherThanP256IsMalformed(array $options): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withCredentialPublicKeyPem(Pem::generatedPublicKey($options))
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation));
+    }
+
     public function testMissingNonceExtensionFails(): void
     {
         $attestation = AttestationBuilder::create()
@@ -214,7 +307,7 @@ final class AttestationVerifierTest extends TestCase
      *
      * @psalm-capabilities read-props
      */
-    public static function badNonceExtensions(): iterable
+    public static function provideBadNonceExtensions(): iterable
     {
         yield 'empty sequence' => ["\x30\x00"];
         yield 'bare octet string' => ["\x04\x20" . str_repeat("\x01", 32)];
@@ -223,7 +316,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'not DER' => ["\xff\xff\xff"];
     }
 
-    #[DataProvider('badNonceExtensions')]
+    #[DataProvider('provideBadNonceExtensions')]
     public function testBadNonceExtensionFails(string $der): void
     {
         $attestation = AttestationBuilder::create()
@@ -239,7 +332,7 @@ final class AttestationVerifierTest extends TestCase
             ->withLeadingZeroX()
             ->build();
         $key = self::verifyBuilt($attestation);
-        $point = mb_substr(self::spkiOf($key->publicKeyPem), -65, null, '8bit');
+        $point = mb_substr(self::spkiOf($key->publicKeyPem), -EcKey::POINT_LENGTH, null, '8bit');
 
         self::assertSame("\x04\x00", mb_substr($point, 0, 2, '8bit'));
         self::assertSame(hash('sha256', $point, true), $key->keyId);
@@ -251,7 +344,7 @@ final class AttestationVerifierTest extends TestCase
      *
      * @psalm-capabilities read-props
      */
-    public static function truncatedAuthDataLengths(): iterable
+    public static function provideTruncatedAuthDataLengths(): iterable
     {
         yield 'empty' => [0];
         yield 'no counter' => [36];
@@ -260,7 +353,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'no public key' => [87];
     }
 
-    #[DataProvider('truncatedAuthDataLengths')]
+    #[DataProvider('provideTruncatedAuthDataLengths')]
     public function testTruncatedAuthDataIsMalformed(int $length): void
     {
         $attestation = AttestationBuilder::create()
@@ -296,10 +389,24 @@ final class AttestationVerifierTest extends TestCase
         self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: $cbor)->keyId);
     }
 
+    public function testIndefiniteLengthEncodingIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $attStmt = IndefiniteLengthMapObject::create()
+            ->add(TextStringObject::create('x5c'), IndefiniteLengthListObject::create(self::chunked($attestation->credentialDer), self::chunked($attestation->intermediateDer)))
+            ->add(IndefiniteLengthTextStringObject::create('rec', 'eipt'), self::chunked($attestation->receipt));
+        $cbor = (string) IndefiniteLengthMapObject::create()
+            ->add(TextStringObject::create('fmt'), IndefiniteLengthTextStringObject::create('apple-', 'appattest'))
+            ->add(TextStringObject::create('attStmt'), $attStmt)
+            ->add(TextStringObject::create('authData'), self::chunked($attestation->authData));
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: $cbor)->keyId);
+    }
+
     /**
      * @return iterable<string, array{callable(BuiltAttestation): list<string>}>
      */
-    public static function brokenChains(): iterable
+    public static function provideBrokenChains(): iterable
     {
         yield 'credential only' => [static fn(BuiltAttestation $a): array => [$a->credentialDer]];
         yield 'three certificates' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, $a->intermediateDer, $a->intermediateDer]];
@@ -314,7 +421,7 @@ final class AttestationVerifierTest extends TestCase
     /**
      * @param callable(BuiltAttestation): list<string> $certificates
      */
-    #[DataProvider('brokenChains')]
+    #[DataProvider('provideBrokenChains')]
     public function testBrokenChainFails(callable $certificates): void
     {
         $attestation = AttestationBuilder::create()->build();
@@ -326,12 +433,18 @@ final class AttestationVerifierTest extends TestCase
     /**
      * @return iterable<string, array{callable(BuiltAttestation): string}>
      */
-    public static function malformedDocuments(): iterable
+    public static function provideMalformedDocuments(): iterable
     {
         yield 'truncated' => [static fn(BuiltAttestation $a): string => mb_substr($a->cbor, 0, 100, '8bit')];
         yield 'no fmt' => [static fn(BuiltAttestation $a): string => self::attestationObject(self::x5c($a->credentialDer, $a->intermediateDer), $a->authData, format: null)];
         yield 'no receipt' => [static fn(BuiltAttestation $a): string => self::attestationObject(self::x5c($a->credentialDer, $a->intermediateDer), $a->authData, receipt: null)];
         yield 'x5c not a list' => [static fn(BuiltAttestation $a): string => self::attestationObject(ByteStringObject::create($a->credentialDer), $a->authData)];
+        yield 'x5c a map' => [static fn(BuiltAttestation $a): string => self::attestationObject(
+            MapObject::create()
+                ->add(TextStringObject::create('a'), ByteStringObject::create($a->credentialDer))
+                ->add(TextStringObject::create('b'), ByteStringObject::create($a->intermediateDer)),
+            $a->authData,
+        )];
         yield 'x5c holding an integer' => [static fn(BuiltAttestation $a): string => self::attestationObject(ListObject::create([ByteStringObject::create($a->credentialDer), UnsignedIntegerObject::create(1)]), $a->authData)];
         yield 'no authData' => [static fn(BuiltAttestation $a): string => self::attestationObject(self::x5c($a->credentialDer, $a->intermediateDer), null)];
     }
@@ -339,7 +452,7 @@ final class AttestationVerifierTest extends TestCase
     /**
      * @param callable(BuiltAttestation): string $document
      */
-    #[DataProvider('malformedDocuments')]
+    #[DataProvider('provideMalformedDocuments')]
     public function testMalformedDocumentFails(callable $document): void
     {
         $attestation = AttestationBuilder::create()->build();
@@ -351,16 +464,16 @@ final class AttestationVerifierTest extends TestCase
     /**
      * @return iterable<string, array{string}>
      */
-    public static function garbage(): iterable
+    public static function provideGarbage(): iterable
     {
         yield 'empty' => [''];
         yield 'text' => ['garbage'];
         yield 'bytes' => [str_repeat(hash('sha512', 'garbage', true), 4)];
-        yield 'a list' => [(string) ListObject::create([TextStringObject::create(self::FORMAT)])];
-        yield 'a text string' => [(string) TextStringObject::create(self::FORMAT)];
+        yield 'a list' => [(string) ListObject::create([TextStringObject::create(AttestationBuilder::FORMAT)])];
+        yield 'a text string' => [(string) TextStringObject::create(AttestationBuilder::FORMAT)];
     }
 
-    #[DataProvider('garbage')]
+    #[DataProvider('provideGarbage')]
     public function testGarbageIsMalformed(string $cbor): void
     {
         self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt(AttestationBuilder::create()->build(), cbor: $cbor));
@@ -369,32 +482,76 @@ final class AttestationVerifierTest extends TestCase
     public function testDamagedGenuineVectorNeverRaisesAPhpError(): void
     {
         $vector = Fixtures::attestation(self::MUTATED_VECTOR);
-        $bytes = $vector->bytes;
-        $length = mb_strlen($bytes, '8bit');
-        $damaged = [];
+        $damaged = Damage::of($vector->bytes, step: 11);
+        $outcomes = Damage::withoutPhpErrors(static fn(): array => array_map(static fn(Damaged $d): string => self::outcomeOf($vector, $d->bytes), $damaged));
 
-        for ($offset = 0; $offset < $length; $offset += 11) {
-            $damaged[] = mb_substr($bytes, 0, $offset, '8bit');
-            $damaged[] = mb_substr($bytes, 0, $offset, '8bit') . chr(ord($bytes[$offset]) ^ 0xFF) . mb_substr($bytes, $offset + 1, null, '8bit');
+        foreach ($damaged as $index => $d) {
+            if (($outcomes[$index] ?? null) === 'accepted') {
+                self::assertNotNull($d->mask, 'An attestation truncated to ' . $d->offset . ' bytes was accepted.');
+                self::assertTrue(self::isHarmlessDamage($vector->bytes, $d->offset), 'Damage at byte ' . $d->offset . ' was accepted.');
+            }
         }
 
-        $errors = [];
-        set_error_handler(static function(int $severity, string $message) use (&$errors): bool {
-            $errors[] = $severity . ': ' . $message;
-
-            return true;
-        });
-
-        try {
-            $outcomes = array_map(static fn(string $cbor): string => self::outcomeOf($vector, $cbor), $damaged);
-        } finally {
-            restore_error_handler();
-        }
-
-        self::assertSame([], $errors);
-        self::assertNotContains('error', $outcomes);
+        self::assertContains('accepted', $outcomes);
         self::assertContains(AttestationFailureReason::Format->name, $outcomes);
         self::assertContains(AttestationFailureReason::CertificateChain->name, $outcomes);
+    }
+
+    public function testDamagedGenuineCertificatesNeverRaiseAPhpError(): void
+    {
+        $vector = Fixtures::attestation(self::MUTATED_VECTOR);
+        [$credential, $intermediate] = self::certificatesOf($vector->bytes);
+        $authData = self::authDataOf($vector->bytes);
+
+        Damage::withoutPhpErrors(static function() use ($vector, $credential, $intermediate, $authData): void {
+            foreach (Damage::of($credential, [0x01], truncations: false) as $d) {
+                self::assertChainRefusesDamage($credential, $d, self::outcomeOf($vector, self::attestationObject(self::x5c($d->bytes, $intermediate), $authData)));
+            }
+
+            foreach (Damage::of($intermediate, [0x01], truncations: false) as $d) {
+                self::assertChainRefusesDamage($intermediate, $d, self::outcomeOf($vector, self::attestationObject(self::x5c($credential, $d->bytes), $authData)));
+            }
+        });
+    }
+
+    /**
+     * Damage that makes phpseclib raise a warning, found by damaging every byte of the certificates.
+     *
+     * @return iterable<string, array{bool, int, int}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideCertificateDamageThatMakesPhpseclibWarn(): iterable
+    {
+        yield 'credential byte 9 XOR 0x01' => [false, 9, 0x01];
+        yield 'credential byte 385 XOR 0x80' => [false, 385, 0x80];
+        yield 'credential byte 386 XOR 0x01' => [false, 386, 0x01];
+        yield 'credential byte 387 XOR 0xFF' => [false, 387, 0xFF];
+        yield 'credential byte 417 XOR 0xFF' => [false, 417, 0xFF];
+        yield 'intermediate byte 9 XOR 0x01' => [true, 9, 0x01];
+        yield 'intermediate byte 360 XOR 0x80' => [true, 360, 0x80];
+        yield 'intermediate byte 395 XOR 0x01' => [true, 395, 0x01];
+        yield 'intermediate byte 460 XOR 0xFF' => [true, 460, 0xFF];
+    }
+
+    #[DataProvider('provideCertificateDamageThatMakesPhpseclibWarn')]
+    public function testCertificateDamageThatMakesPhpseclibWarnFailsTheChainSilently(bool $intermediateDamaged, int $offset, int $mask): void
+    {
+        $vector = Fixtures::attestation(self::MUTATED_VECTOR);
+        [$credential, $intermediate] = self::certificatesOf($vector->bytes);
+
+        if ($intermediateDamaged) {
+            $intermediate = Damage::flipped($intermediate, $offset, $mask);
+        } else {
+            $credential = Damage::flipped($credential, $offset, $mask);
+        }
+
+        $cbor = self::attestationObject(self::x5c($credential, $intermediate), self::authDataOf($vector->bytes));
+
+        self::assertSame(
+            AttestationFailureReason::CertificateChain->name,
+            Damage::withoutPhpErrors(static fn(): string => self::outcomeOf($vector, $cbor)),
+        );
     }
 
     /**
@@ -429,6 +586,17 @@ final class AttestationVerifierTest extends TestCase
             $attestation->keyId,
             $attestation->app,
             $allowed,
+        );
+    }
+
+    private static function verifyWithTheDefaultClock(BuiltAttestation $attestation): AttestedKey
+    {
+        return (new AttestationVerifier($attestation->trustAnchor()))->verify(
+            $attestation->cbor,
+            $attestation->clientDataHash,
+            $attestation->keyId,
+            $attestation->app,
+            [Environment::Development],
         );
     }
 
@@ -467,7 +635,7 @@ final class AttestationVerifierTest extends TestCase
     private static function attestationObject(
         CBORObject $x5c,
         ?string $authData,
-        ?string $format = self::FORMAT,
+        ?string $format = AttestationBuilder::FORMAT,
         ?string $receipt = AttestationBuilder::RECEIPT,
     ): string {
         $attStmt = MapObject::create()->add(TextStringObject::create('x5c'), $x5c);
@@ -490,26 +658,119 @@ final class AttestationVerifierTest extends TestCase
         return (string) $document;
     }
 
-    private static function receiptOf(string $cbor): string
+    private static function assertChainRefusesDamage(string $der, Damaged $damaged, string $outcome): void
+    {
+        if ($outcome === 'accepted') {
+            self::assertTrue(self::isSignatureUnusedBitsByte($der, $damaged->offset), 'Damage at certificate byte ' . $damaged->offset . ' was accepted.');
+
+            return;
+        }
+
+        self::assertSame(AttestationFailureReason::CertificateChain->name, $outcome, 'Damage at certificate byte ' . $damaged->offset . '.');
+    }
+
+    /**
+     * Whether damage at this byte of a genuine attestation leaves it valid: inside the receipt, which is not
+     * signed, or the unused-bits byte of a certificate's signature.
+     */
+    private static function isHarmlessDamage(string $cbor, int $offset): bool
+    {
+        $receipt = self::receiptOf($cbor);
+        $receiptStart = mb_strpos($cbor, $receipt, 0, '8bit');
+
+        if (is_int($receiptStart) && $offset >= $receiptStart && $offset < $receiptStart + mb_strlen($receipt, '8bit')) {
+            return true;
+        }
+
+        foreach (self::certificatesOf($cbor) as $der) {
+            $start = mb_strpos($cbor, $der, 0, '8bit');
+
+            if (is_int($start) && self::isSignatureUnusedBitsByte($der, $offset - $start)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * phpseclib skips the unused-bits byte of the signature BIT STRING, the last element of a certificate,
+     * so damage there leaves the certificate valid.
+     *
+     * @psalm-pure
+     */
+    private static function isSignatureUnusedBitsByte(string $der, int $offset): bool
+    {
+        $length = mb_strlen($der, '8bit');
+
+        return $offset >= 2 && $offset < $length && $der[$offset - 2] === "\x03" && ord($der[$offset - 1]) === $length - $offset;
+    }
+
+    /**
+     * @return array<array-key, mixed>
+     */
+    private static function documentOf(string $cbor): array
     {
         $object = Decoder::create()->decode(StringStream::create($cbor));
         self::assertInstanceOf(Normalizable::class, $object);
         $document = $object->normalize();
         self::assertIsArray($document);
-        $attStmt = $document['attStmt'] ?? null;
+
+        return $document;
+    }
+
+    /**
+     * @return array<array-key, mixed>
+     */
+    private static function attStmtOf(string $cbor): array
+    {
+        $attStmt = self::documentOf($cbor)['attStmt'] ?? null;
         self::assertIsArray($attStmt);
-        $receipt = $attStmt['receipt'] ?? null;
+
+        return $attStmt;
+    }
+
+    private static function receiptOf(string $cbor): string
+    {
+        $receipt = self::attStmtOf($cbor)['receipt'] ?? null;
         self::assertIsString($receipt);
         self::assertNotSame('', $receipt);
 
         return $receipt;
     }
 
+    /**
+     * @return array{string, string}
+     */
+    private static function certificatesOf(string $cbor): array
+    {
+        $x5c = self::attStmtOf($cbor)['x5c'] ?? null;
+        self::assertIsArray($x5c);
+        $credential = $x5c[0] ?? null;
+        $intermediate = $x5c[1] ?? null;
+        self::assertIsString($credential);
+        self::assertIsString($intermediate);
+
+        return [$credential, $intermediate];
+    }
+
+    private static function authDataOf(string $cbor): string
+    {
+        $authData = self::documentOf($cbor)['authData'] ?? null;
+        self::assertIsString($authData);
+
+        return $authData;
+    }
+
+    private static function chunked(string $bytes): IndefiniteLengthByteStringObject
+    {
+        return IndefiniteLengthByteStringObject::create(...mb_str_split($bytes, 50, '8bit'));
+    }
+
     private static function spkiOf(string $pem): string
     {
-        $spki = base64_decode(preg_replace('/-----[A-Z ]+-----|\\s+/', '', $pem) ?? '', true);
-        self::assertIsString($spki);
-        self::assertSame(91, mb_strlen($spki, '8bit'));
+        $spki = Pem::toDer($pem);
+        self::assertSame(EcKey::SPKI_LENGTH, mb_strlen($spki, '8bit'));
 
         return $spki;
     }

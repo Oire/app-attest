@@ -22,8 +22,8 @@ namespace Oire\AppAttest\Internal;
  */
 
 /**
- * The authenticatorData of an attestation: rpIdHash (32 bytes), flags (1), signCount (4, big-endian),
- * aaguid (16), credentialId length (2, big-endian), credentialId, then the credential public key.
+ * Authenticator data: rpIdHash (32 bytes), flags (1), signCount (4, big-endian), then, in an attestation
+ * only, aaguid (16), credentialId length (2, big-endian), credentialId and the credential public key.
  * Bytes after the credentialId are not interpreted: the public key, and any extensions Apple appends.
  *
  * @internal
@@ -34,15 +34,18 @@ final readonly class AuthenticatorData
 {
     private const int RP_ID_HASH_LENGTH = 32;
     private const int COUNTER_OFFSET = 33;
+    private const int COUNTER_LENGTH = 4;
+    public const int ASSERTION_LENGTH = self::COUNTER_OFFSET + self::COUNTER_LENGTH;
     private const int AAGUID_OFFSET = 37;
     private const int AAGUID_LENGTH = 16;
     private const int CREDENTIAL_ID_LENGTH_OFFSET = 53;
+    private const int CREDENTIAL_ID_LENGTH_SIZE = 2;
     private const int CREDENTIAL_ID_OFFSET = 55;
 
     /**
      * @param string $rpIdHash     raw bytes
-     * @param string $aaguid       raw bytes
-     * @param string $credentialId raw bytes
+     * @param string $aaguid       raw bytes, empty in an assertion
+     * @param string $credentialId raw bytes, empty in an assertion
      *
      * @psalm-capabilities read-props
      */
@@ -66,18 +69,49 @@ final readonly class AuthenticatorData
             return null;
         }
 
-        $credentialIdLength = self::unsigned('n', mb_substr($bytes, self::CREDENTIAL_ID_LENGTH_OFFSET, 2, '8bit'));
+        $credentialIdLength = self::unsigned('n', mb_substr($bytes, self::CREDENTIAL_ID_LENGTH_OFFSET, self::CREDENTIAL_ID_LENGTH_SIZE, '8bit'));
 
         if ($length <= self::CREDENTIAL_ID_OFFSET + $credentialIdLength) {
             return null;
         }
 
         return new self(
-            mb_substr($bytes, 0, self::RP_ID_HASH_LENGTH, '8bit'),
-            self::unsigned('N', mb_substr($bytes, self::COUNTER_OFFSET, 4, '8bit')),
+            self::rpIdHashOf($bytes),
+            self::counterOf($bytes),
             mb_substr($bytes, self::AAGUID_OFFSET, self::AAGUID_LENGTH, '8bit'),
             mb_substr($bytes, self::CREDENTIAL_ID_OFFSET, $credentialIdLength, '8bit'),
         );
+    }
+
+    /**
+     * The rpIdHash and counter of an assertion, or null if the bytes are shorter than ASSERTION_LENGTH.
+     * Bytes after the counter are not interpreted.
+     *
+     * @psalm-pure
+     */
+    public static function tryFromAssertion(string $bytes): ?self
+    {
+        if (mb_strlen($bytes, '8bit') < self::ASSERTION_LENGTH) {
+            return null;
+        }
+
+        return new self(self::rpIdHashOf($bytes), self::counterOf($bytes), '', '');
+    }
+
+    /**
+     * @psalm-pure
+     */
+    private static function rpIdHashOf(string $bytes): string
+    {
+        return mb_substr($bytes, 0, self::RP_ID_HASH_LENGTH, '8bit');
+    }
+
+    /**
+     * @psalm-pure
+     */
+    private static function counterOf(string $bytes): int
+    {
+        return self::unsigned('N', mb_substr($bytes, self::COUNTER_OFFSET, self::COUNTER_LENGTH, '8bit'));
     }
 
     /**

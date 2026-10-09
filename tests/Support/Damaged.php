@@ -2,11 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Oire\AppAttest;
-
-use DateTimeImmutable;
-use Override;
-use Psr\Clock\ClockInterface;
+namespace Oire\AppAttest\Tests\Support;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -26,15 +22,16 @@ use Psr\Clock\ClockInterface;
  */
 
 /**
- * The PSR-20 clock used when the caller passes none: the current system time.
+ * A damaged copy of some bytes: cut off at an offset, or with the byte at the offset XORed with a mask.
  *
- * @psalm-api
+ * @psalm-immutable
  */
-final readonly class SystemClock implements ClockInterface
+final readonly class Damaged
 {
-    #[Override]
-    public function now(): DateTimeImmutable
-    {
-        return new DateTimeImmutable();
-    }
+    /**
+     * @param ?int $mask null if the bytes are truncated at the offset
+     *
+     * @psalm-capabilities read-props
+     */
+    public function __construct(public int $offset, public ?int $mask, public string $bytes) {}
 }

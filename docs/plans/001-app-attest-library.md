@@ -31,7 +31,8 @@ to the caller, who passes the stored public key and counter in and stores the ne
       time
 - [x] all binary handling is 8-bit-safe under Oire's code style (Development approach)
 - [ ] Psalm level 1, PHP CS Fixer with Oire's rules and PHPUnit pass in CI on PHP 8.3, 8.4 and 8.5
-- [x] Dependabot watches Composer and GitHub Actions; pushing a `v*` tag creates the GitHub Release
+- [x] Dependabot watches Composer and GitHub Actions; `release.yml` is set up to create the GitHub Release
+      on a `v*` tag (confirmed at the v1.0.0 tag, Post-completion)
 - [x] README documents installation, both verifiers, the reasons, and what the caller must do itself
 - [ ] `v1.0.0` is tagged, the package is on Packagist, and the repository's description and topics are
       set
@@ -190,7 +191,7 @@ Dependencies (Composer; versions pinned to majors):
       creates the release with `gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes`.
       Packagist is updated by its webhook, not by this workflow (Post-completion)
 - [x] a smoke test that autoloads the namespace and reads the time from `SystemClock`
-- [x] validation commands pass, CI green (CI: checked on the pull request)
+- [x] validation commands pass locally; CI is checked on the pull request (see Done when)
 
 ### Task 2: Value types, exceptions and the trust anchor
 
@@ -445,36 +446,56 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 
 ### Public API
 
+⚠️ Updated after review to match the code: the classes are `final readonly`, and the sketch now lists the
+members added during implementation (plan execution, 2026-10-09).
+
 ```php
 namespace Oire\AppAttest;
 
 use Psr\Clock\ClockInterface;
 
-final class AttestationVerifier {
+final readonly class AttestationVerifier {
     public function __construct(?TrustAnchor $root = null, ?ClockInterface $clock = null);
     /** @param list<Environment> $allowed  @throws AttestationException */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId,
                            AppIdentity $app, array $allowed): AttestedKey;
 }
 
-final class AssertionVerifier {
-    /** @throws AssertionException */
+final readonly class AssertionVerifier {
+    /** @throws InvalidArgumentException  @throws AssertionException */
     public function verify(string $assertionCbor, string $clientData, string $publicKeyPem,
                            int $previousCounter, AppIdentity $app): int; // the new counter
 }
 
-final class TrustAnchor { public static function apple(): self; public static function fromPem(string $pem): self; }
+final readonly class TrustAnchor {
+    public const string APPLE_ROOT_SHA256; // lowercase hexadecimal
+    public string $pem;
+    public static function apple(): self;
+    public static function fromPem(string $pem): self;
+    /** @internal */ public static function fromPinnedPem(string $pem, string $sha256Fingerprint): self;
+}
+
+final readonly class SystemClock implements ClockInterface {}
 ```
 
 ```php
 namespace Oire\AppAttest\Value;
 
-final class TeamId { public function __construct(public readonly string $value) } // 10 × A-Z0-9
-final class BundleId { public function __construct(public readonly string $value) } // A-Za-z0-9 - .
-final class AppIdentity { public function __construct(TeamId $teamId, BundleId $bundleId) }
-enum Environment: string { case Production = 'production'; case Development = 'development'; }
-final class AttestedKey {
-    string $keyId; string $publicKeyPem; Environment $environment; string $receipt; int $counter;
+final readonly class TeamId { public function __construct(public string $value) } // 10 × A-Z0-9
+final readonly class BundleId { public function __construct(public string $value) } // A-Za-z0-9 - .
+final readonly class AppIdentity {
+    public function __construct(TeamId $teamId, BundleId $bundleId);
+    public function appId(): string;    // <team id>.<bundle id>
+    public function rpIdHash(): string; // SHA-256 of appId(), raw bytes
+}
+enum Environment: string {
+    case Production = 'production'; case Development = 'development';
+    public function aaguid(): string;
+    public static function tryFromAaguid(string $aaguid): ?self;
+}
+final readonly class AttestedKey {
+    public function __construct(string $keyId, string $publicKeyPem, Environment $environment, string $receipt);
+    string $keyId; string $publicKeyPem; Environment $environment; string $receipt; int $counter; // 0
     public function keyIdBase64Url(): string;
 }
 ```

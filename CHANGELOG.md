@@ -10,12 +10,13 @@ The first release: verification of Apple App Attest attestations and assertions,
   in the credential certificate, the key id, the `rpIdHash`, a zero counter, the environment and the
   `credentialId`. It returns an `AttestedKey` with the key id, the public key as PEM, the environment, the
   receipt and counter 0. `clientDataHash` may be any length, as in Apple's own sample.
-* **`AssertionVerifier`** checks an assertion's ECDSA P-256 signature over the nonce
-  SHA-256(`authenticatorData` ‖ SHA-256(`clientData`)), its `rpIdHash` and a counter strictly greater than
-  the previous one, and returns the new counter. `clientData` is never parsed.
+* **`AssertionVerifier`** checks an assertion's ECDSA P-256 signature over the nonce, the SHA-256 of
+  `authenticatorData` followed by the SHA-256 of `clientData`, its `rpIdHash` and a counter strictly
+  greater than the previous one, and returns the new counter. `clientData` is never parsed.
 * **Typed failures:** `AttestationException` and `AssertionException`, both extending the abstract
   `AppAttestException`, carry a `$reason` enum case naming the failed check. Caller errors, such as an
-  invalid team id or public key, are `InvalidArgumentException`.
+  invalid team id or public key, are `InvalidArgumentException`. A broken installation or another
+  phpseclib map registered for the nonce extension is a `LogicException`.
 * **`TrustAnchor`** bundles Apple's App Attest root and checks its pinned SHA-256 fingerprint on every
   load; `TrustAnchor::fromPem()` takes a test root.
 * **Value objects:** `TeamId`, `BundleId`, `AppIdentity`, the `Environment` enum and `AttestedKey`.

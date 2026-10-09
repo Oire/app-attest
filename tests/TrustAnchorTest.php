@@ -6,6 +6,7 @@ namespace Oire\AppAttest\Tests;
 
 use InvalidArgumentException;
 use LogicException;
+use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\TrustAnchor;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -44,9 +45,9 @@ final class TrustAnchorTest extends TestCase
 
     public function testTamperedRootFailsThePinnedCheck(): void
     {
-        $der = self::derOf(self::bundledRoot());
+        $der = Pem::toDer(self::bundledRoot());
         $der[-1] = chr(ord($der[-1]) ^ 0x01);
-        $tampered = "-----BEGIN CERTIFICATE-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END CERTIFICATE-----\n";
+        $tampered = Pem::fromDer($der, Pem::CERTIFICATE);
 
         self::assertNotFalse(openssl_x509_read($tampered));
 
@@ -90,13 +91,5 @@ final class TrustAnchorTest extends TestCase
         self::assertIsString($pem);
 
         return $pem;
-    }
-
-    private static function derOf(string $pem): string
-    {
-        $der = base64_decode(preg_replace('/-----[A-Z ]+-----|\\s+/', '', $pem) ?? '', true);
-        self::assertIsString($der);
-
-        return $der;
     }
 }

@@ -6,6 +6,7 @@ namespace Oire\AppAttest;
 
 use InvalidArgumentException;
 use LogicException;
+use Oire\AppAttest\Internal\Pem;
 use phpseclib3\File\X509;
 
 /**
@@ -68,7 +69,7 @@ final readonly class TrustAnchor
      */
     public static function fromPem(string $pem): self
     {
-        $der = self::toDer($pem);
+        $der = Pem::tryDecode($pem, Pem::CERTIFICATE);
 
         if ($der === null || (new X509())->loadX509($der, X509::FORMAT_DER) === false) {
             throw new InvalidArgumentException('The trust anchor must be exactly one PEM-encoded X.509 certificate.');
@@ -88,26 +89,12 @@ final readonly class TrustAnchor
      */
     public static function fromPinnedPem(string $pem, string $sha256Fingerprint): self
     {
-        $der = self::toDer($pem);
+        $der = Pem::tryDecode($pem, Pem::CERTIFICATE);
 
         if ($der === null || !hash_equals($sha256Fingerprint, hash('sha256', $der))) {
             throw new LogicException('The root certificate does not match its pinned SHA-256 fingerprint.');
         }
 
         return new self($pem);
-    }
-
-    /**
-     * @psalm-pure
-     */
-    private static function toDer(string $pem): ?string
-    {
-        if (preg_match('/^\\s*-----BEGIN CERTIFICATE-----([A-Za-z0-9+\\/=\\s]+)-----END CERTIFICATE-----\\s*$/D', $pem, $matches) !== 1 || !isset($matches[1])) {
-            return null;
-        }
-
-        $der = base64_decode($matches[1], true);
-
-        return $der === false || $der === '' ? null : $der;
     }
 }

@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
+use LogicException;
 use phpseclib3\File\ASN1;
 use phpseclib3\File\X509;
+use RuntimeException;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -29,6 +31,7 @@ use phpseclib3\File\X509;
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
  * phpseclib keeps extension maps globally, so the verifier and the test builders register this one map.
+ * Another map already registered for the OID is a misconfigured process, not a failed verification.
  *
  * @internal
  */
@@ -46,8 +49,15 @@ final class NonceExtension
         ],
     ];
 
+    /**
+     * @throws LogicException if the process has registered another map for the OID
+     */
     public static function register(): void
     {
-        X509::registerExtension(self::OID, self::MAP);
+        try {
+            X509::registerExtension(self::OID, self::MAP);
+        } catch (RuntimeException $e) {
+            throw new LogicException('Another ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.', 0, $e);
+        }
     }
 }

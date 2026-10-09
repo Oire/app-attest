@@ -34,7 +34,6 @@ use PHPUnit\Framework\TestCase;
 final class BuildersTest extends TestCase
 {
     private const string NONCE_EXTENSION_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
-    private const string P256_SPKI_PREFIX = "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
 
     public function testBuiltAttestationHasTheAppleLayout(): void
     {
@@ -51,9 +50,9 @@ final class BuildersTest extends TestCase
         self::assertSame($attestation->authData, $document['authData']);
 
         $authData = $attestation->authData;
-        self::assertSame($attestation->app->rpIdHash(), mb_substr($authData, 0, 32, '8bit'));
+        self::assertSame($attestation->app->rpIdHash(), mb_substr($authData, 0, AuthDataLayout::RP_ID_HASH_LENGTH, '8bit'));
         self::assertSame(0, self::counterOf($authData));
-        self::assertSame(Environment::Development->aaguid(), mb_substr($authData, 37, 16, '8bit'));
+        self::assertSame(Environment::Development->aaguid(), mb_substr($authData, AuthDataLayout::AAGUID_OFFSET, AuthDataLayout::AAGUID_LENGTH, '8bit'));
         self::assertSame($attestation->keyId, self::credentialIdOf($authData));
         self::assertSame(hash('sha256', self::pointOf($attestation->credentialDer), true), $attestation->keyId);
         self::assertSame(self::pointOf($attestation->credentialDer), self::pointOfPem($attestation->publicKeyPem));
@@ -129,9 +128,9 @@ final class BuildersTest extends TestCase
         $authData = $attestation->authData;
 
         self::assertSame($app, $attestation->app);
-        self::assertSame($app->rpIdHash(), mb_substr($authData, 0, 32, '8bit'));
+        self::assertSame($app->rpIdHash(), mb_substr($authData, 0, AuthDataLayout::RP_ID_HASH_LENGTH, '8bit'));
         self::assertSame(7, self::counterOf($authData));
-        self::assertSame(Environment::Production->aaguid(), mb_substr($authData, 37, 16, '8bit'));
+        self::assertSame(Environment::Production->aaguid(), mb_substr($authData, AuthDataLayout::AAGUID_OFFSET, AuthDataLayout::AAGUID_LENGTH, '8bit'));
         self::assertSame($credentialId, self::credentialIdOf($authData));
         self::assertNotSame($credentialId, $attestation->keyId);
         self::assertSame(
@@ -142,7 +141,7 @@ final class BuildersTest extends TestCase
         $unknown = AttestationBuilder::create()
             ->withAaguid(str_repeat("\xff", 16))
             ->build();
-        self::assertSame(str_repeat("\xff", 16), mb_substr($unknown->authData, 37, 16, '8bit'));
+        self::assertSame(str_repeat("\xff", 16), mb_substr($unknown->authData, AuthDataLayout::AAGUID_OFFSET, AuthDataLayout::AAGUID_LENGTH, '8bit'));
     }
 
     public function testCredentialKeyCanStartWithAZeroByte(): void
@@ -183,6 +182,50 @@ final class BuildersTest extends TestCase
         self::assertFalse(self::validAt($attestation->credentialDer, new DateTimeImmutable(AttestationBuilder::DEFAULT_TIME)));
     }
 
+    public function testCredentialCertificateCanHoldAnotherKey(): void
+    {
+        $p384 = Pem::generatedPublicKey(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp384r1']);
+        $attestation = AttestationBuilder::create()
+            ->withCredentialPublicKeyPem($p384)
+            ->build();
+        $credentialKey = openssl_pkey_get_public(Pem::fromDer($attestation->credentialDer, Pem::CERTIFICATE));
+        self::assertNotFalse($credentialKey);
+
+        self::assertSame($p384, openssl_pkey_get_details($credentialKey)['key'] ?? null);
+        self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
+        self::assertSame($attestation->keyId, self::credentialIdOf($attestation->authData));
+    }
+
+    public function testRootCanBeExpired(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExpiredRoot()
+            ->build();
+        $now = $attestation->clock()->now();
+
+        self::assertFalse(self::validAt($attestation->rootPem, $now));
+        self::assertTrue(self::validAt($attestation->rootPem, $now->modify('-2 days')));
+        self::assertTrue(self::validAt($attestation->intermediateDer, $now));
+        self::assertTrue(self::validAt($attestation->credentialDer, $now));
+        self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+    }
+
+    public function testCredentialCanComeFromAnUnlistedIssuer(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
+            ->build();
+        $credential = new X509();
+        self::assertIsArray($credential->loadX509($attestation->credentialDer));
+
+        self::assertSame(['Oire Test Unlisted CA'], $credential->getIssuerDNProp('id-at-commonName'));
+        self::assertSame(
+            [['accessMethod' => 'id-ad-caIssuers', 'accessLocation' => ['uniformResourceIdentifier' => 'http://192.0.2.1/ca.cer']]],
+            $credential->getExtension('id-pe-authorityInfoAccess'),
+        );
+        self::assertNotNull(self::nonceExtensionOf($attestation->credentialDer));
+    }
+
     public function testBuiltAssertionIsSignedLikeADevice(): void
     {
         $builder = AssertionBuilder::create();
@@ -193,8 +236,8 @@ final class BuildersTest extends TestCase
         self::assertIsString($authenticatorData);
 
         self::assertSame(['signature', 'authenticatorData'], array_keys($document));
-        self::assertSame(37, mb_strlen($authenticatorData, '8bit'));
-        self::assertSame((new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.app')))->rpIdHash(), mb_substr($authenticatorData, 0, 32, '8bit'));
+        self::assertSame(AuthDataLayout::ASSERTION_LENGTH, mb_strlen($authenticatorData, '8bit'));
+        self::assertSame(TestApp::identity()->rpIdHash(), mb_substr($authenticatorData, 0, AuthDataLayout::RP_ID_HASH_LENGTH, '8bit'));
         self::assertSame(1, self::counterOf($authenticatorData));
         self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
         self::assertSame(0, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'other data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
@@ -213,7 +256,7 @@ final class BuildersTest extends TestCase
         self::assertIsString($authenticatorData);
         self::assertIsString($signature);
 
-        self::assertSame($app->rpIdHash(), mb_substr($authenticatorData, 0, 32, '8bit'));
+        self::assertSame($app->rpIdHash(), mb_substr($authenticatorData, 0, AuthDataLayout::RP_ID_HASH_LENGTH, '8bit'));
         self::assertSame(5, self::counterOf($authenticatorData));
         self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
     }
@@ -241,7 +284,7 @@ final class BuildersTest extends TestCase
 
     private static function counterOf(string $authData): int
     {
-        $counter = unpack('N', mb_substr($authData, 33, 4, '8bit'));
+        $counter = unpack('N', mb_substr($authData, AuthDataLayout::COUNTER_OFFSET, AuthDataLayout::COUNTER_LENGTH, '8bit'));
 
         if ($counter === false || !isset($counter[1]) || !is_int($counter[1])) {
             self::fail('The counter cannot be read.');
@@ -252,30 +295,29 @@ final class BuildersTest extends TestCase
 
     private static function credentialIdOf(string $authData): string
     {
-        $length = unpack('n', mb_substr($authData, 53, 2, '8bit'));
+        $length = unpack('n', mb_substr($authData, AuthDataLayout::CREDENTIAL_ID_LENGTH_OFFSET, 2, '8bit'));
 
         if ($length === false || !isset($length[1]) || !is_int($length[1])) {
             self::fail('The credentialId length cannot be read.');
         }
 
-        return mb_substr($authData, 55, $length[1], '8bit');
+        return mb_substr($authData, AuthDataLayout::CREDENTIAL_ID_OFFSET, $length[1], '8bit');
     }
 
     private static function pointOf(string $certificateDer): string
     {
-        $offset = mb_strpos($certificateDer, self::P256_SPKI_PREFIX, 0, '8bit');
+        $offset = mb_strpos($certificateDer, EcKey::P256_SPKI_PREFIX, 0, '8bit');
         self::assertIsInt($offset);
 
-        return mb_substr($certificateDer, $offset + mb_strlen(self::P256_SPKI_PREFIX, '8bit'), 65, '8bit');
+        return mb_substr($certificateDer, $offset + mb_strlen(EcKey::P256_SPKI_PREFIX, '8bit'), EcKey::POINT_LENGTH, '8bit');
     }
 
     private static function pointOfPem(string $pem): string
     {
-        $spki = base64_decode(preg_replace('/-----[A-Z ]+-----|\\s+/', '', $pem) ?? '', true);
-        self::assertIsString($spki);
-        self::assertSame(91, mb_strlen($spki, '8bit'));
+        $spki = Pem::toDer($pem);
+        self::assertSame(EcKey::SPKI_LENGTH, mb_strlen($spki, '8bit'));
 
-        return mb_substr($spki, -65, null, '8bit');
+        return mb_substr($spki, -EcKey::POINT_LENGTH, null, '8bit');
     }
 
     private static function nonceExtensionOf(string $certificateDer): ?string
