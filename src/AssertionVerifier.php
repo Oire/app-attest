@@ -40,7 +40,7 @@ use Oire\AppAttest\Value\LaunchPolicy;
  */
 final readonly class AssertionVerifier
 {
-    private const int MAX_COUNTER = 0xFFFFFFFF;
+    private const int MAX_LENGTH = 4096;
 
     /**
      * @param string        $assertionCbor   the assertion object as raw bytes
@@ -60,8 +60,12 @@ final readonly class AssertionVerifier
         $point = self::pointOf($publicKeyPem)
             ?? throw new InvalidArgumentException('The public key must be a PEM-encoded uncompressed P-256 public key.');
 
-        if ($previousCounter < 0 || $previousCounter > self::MAX_COUNTER) {
+        if ($previousCounter < 0 || $previousCounter > AuthenticatorData::MAX_UINT32) {
             throw new InvalidArgumentException('The previous counter must be between 0 and 2^32 - 1.');
+        }
+
+        if (mb_strlen($assertionCbor, '8bit') > self::MAX_LENGTH) {
+            throw new AssertionException(AssertionFailureReason::Format, 'The assertion is longer than ' . self::MAX_LENGTH . ' bytes.');
         }
 
         $document = Cbor::tryDecodeMap($assertionCbor);
@@ -72,7 +76,7 @@ final readonly class AssertionVerifier
         if (!is_string($signature) || !is_string($authenticatorData) || $authData === null) {
             throw new AssertionException(
                 AssertionFailureReason::Format,
-                'The assertion is not an object with a signature and ' . AuthenticatorData::ASSERTION_LENGTH . ' bytes of authenticatorData.',
+                'The assertion is not an object with a signature and at least ' . AuthenticatorData::ASSERTION_LENGTH . ' bytes of authenticatorData.',
             );
         }
 

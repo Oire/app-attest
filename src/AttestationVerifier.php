@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest;
 
+use InvalidArgumentException;
 use LogicException;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
@@ -46,6 +47,7 @@ use Psr\Clock\ClockInterface;
 final readonly class AttestationVerifier
 {
     private const string FORMAT = 'apple-appattest';
+    private const int MAX_LENGTH = 16384;
     private TrustAnchor $root;
     private ClockInterface $clock;
 
@@ -66,11 +68,18 @@ final readonly class AttestationVerifier
      * @param list<Environment> $allowed         the environments a key may come from
      * @param ?LaunchPolicy     $launchPolicy    the launch values the authenticator data must carry; none checked if null
      *
-     * @throws AttestationException if the attestation fails a check; its reason names the check
-     * @throws LogicException       if the process has registered another phpseclib map for the nonce extension
+     * @throws InvalidArgumentException if $allowed is empty or holds anything but Environment cases
+     * @throws AttestationException     if the attestation fails a check; its reason names the check
+     * @throws LogicException           if the process has registered another phpseclib map for the nonce extension
      */
     public function verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey
     {
+        self::assertEnvironments($allowed);
+
+        if (mb_strlen($attestationCbor, '8bit') > self::MAX_LENGTH) {
+            throw new AttestationException(AttestationFailureReason::Format, 'The attestation is longer than ' . self::MAX_LENGTH . ' bytes.');
+        }
+
         $document = Cbor::tryDecodeMap($attestationCbor);
         $attStmt = $document?->get('attStmt');
         $certificates = $attStmt instanceof CborMap ? self::certificates($attStmt->get('x5c')) : null;
@@ -136,6 +145,26 @@ final readonly class AttestationVerifier
     }
 
     /**
+     * @param list<Environment> $allowed
+     *
+     * @throws InvalidArgumentException if the list is empty or holds anything but Environment cases
+     *
+     * @psalm-pure
+     */
+    private static function assertEnvironments(array $allowed): void
+    {
+        if ($allowed === []) {
+            throw new InvalidArgumentException('At least one environment must be allowed.');
+        }
+
+        foreach ($allowed as $environment) {
+            if (!$environment instanceof Environment) {
+                throw new InvalidArgumentException('Each allowed environment must be an Environment.');
+            }
+        }
+    }
+
+    /**
      * @throws AttestationException if the launch values do not pass the policy
      */
     private static function enforce(LaunchPolicy $launchPolicy, Extensions $extensions): void
@@ -164,7 +193,7 @@ final readonly class AttestationVerifier
      */
     private static function certificates(mixed $x5c): ?array
     {
-        if (!is_array($x5c) || !array_is_list($x5c)) {
+        if (!is_array($x5c)) {
             return null;
         }
 

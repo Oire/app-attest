@@ -59,12 +59,19 @@ final readonly class LaunchPolicy
     }
 
     /**
-     * A policy allowing these categories and not checking the bundle version.
+     * A policy allowing these categories and not checking the bundle version. Unlike the constructor's
+     * empty list, no categories at all is refused, so an empty configuration cannot turn the check off.
+     *
+     * @throws InvalidArgumentException if no category is given
      *
      * @psalm-pure
      */
     public static function allowing(ValidationCategory ...$categories): self
     {
+        if ($categories === []) {
+            throw new InvalidArgumentException('At least one validation category must be allowed.');
+        }
+
         return new self(array_values($categories));
     }
 

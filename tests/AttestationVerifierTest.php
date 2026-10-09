@@ -19,6 +19,7 @@ use CBOR\StringStream;
 use CBOR\TextStringObject;
 use CBOR\UnsignedIntegerObject;
 use DateTimeImmutable;
+use InvalidArgumentException;
 use LogicException;
 use Oire\AppAttest\AttestationVerifier;
 use Oire\AppAttest\Exception\AttestationException;
@@ -31,7 +32,10 @@ use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
 use Oire\AppAttest\Tests\Support\ExtensionsMap;
+use Oire\AppAttest\Tests\Support\HostileInput;
 use Oire\AppAttest\Tests\Support\Pem;
+use Oire\AppAttest\Tests\Support\Tagged;
+use Oire\AppAttest\Tests\Support\TestApp;
 use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\AttestedKey;
@@ -69,6 +73,10 @@ final class AttestationVerifierTest extends TestCase
 {
     private const string MUTATED_VECTOR = 'veehaitch-ios-14.4';
     private const string GUIDE_VECTOR = 'takimoto3-apple-guide';
+    private const int MAX_UINT32 = 0xFFFFFFFF;
+    private const int MAX_LENGTH = 16384;
+    private const int HOSTILE_ITEMS = 600_000;
+    private const int NESTED_SEQUENCES_LENGTH = 14000;
 
     /**
      * @return iterable<string, array{AttestationVector}>
@@ -125,7 +133,39 @@ final class AttestationVerifierTest extends TestCase
         $other = $vector->environment === Environment::Production ? Environment::Development : Environment::Production;
 
         self::assertFailure(AttestationFailureReason::Environment, static fn() => self::verifyVector($vector, allowed: [$other]));
-        self::assertFailure(AttestationFailureReason::Environment, static fn() => self::verifyVector($vector, allowed: []));
+    }
+
+    /**
+     * @return iterable<string, array{array<mixed>}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideAllowedListsNotOfEnvironments(): iterable
+    {
+        yield 'empty' => [[]];
+        yield 'a string' => [['development']];
+        yield 'an environment and a string' => [[Environment::Development, 'production']];
+        yield 'an enum value' => [[Environment::Development->value]];
+    }
+
+    /**
+     * @param array<mixed> $allowed
+     */
+    #[DataProvider('provideAllowedListsNotOfEnvironments')]
+    public function testAllowedListNotOfEnvironmentsIsACallerError(array $allowed): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $verifier = new AttestationVerifier($attestation->trustAnchor(), $attestation->clock());
+
+        $this->expectException(InvalidArgumentException::class);
+        /** @psalm-suppress ArgumentTypeCoercion, InvalidArgument */
+        $verifier->verify($attestation->cbor, $attestation->clientDataHash, $attestation->keyId, $attestation->app, $allowed);
+    }
+
+    public function testAnInvalidAllowedListIsReportedBeforeTheAttestationIsRead(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        (new AttestationVerifier())->verify('garbage', '', '', TestApp::identity(), []);
     }
 
     #[DataProvider('provideGenuineVectors')]
@@ -426,8 +466,6 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate with a trailing byte' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, $a->intermediateDer . "\x00"]];
         yield 'intermediate followed by its own PEM' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, $a->intermediateDer . "\n" . Pem::fromDer($a->intermediateDer, Pem::CERTIFICATE)]];
         yield 'indefinite-length credential' => [static fn(BuiltAttestation $a): array => ["\x30\x80" . mb_substr($a->credentialDer, 4, null, '8bit') . "\x00\x00", $a->intermediateDer]];
-        yield '64 KiB of nested sequences as the credential' => [static fn(BuiltAttestation $a): array => [self::nestedSequences(65536), $a->intermediateDer]];
-        yield '64 KiB of nested sequences as the intermediate' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, self::nestedSequences(65536)]];
     }
 
     /**
@@ -440,6 +478,29 @@ final class AttestationVerifierTest extends TestCase
         $cbor = self::attestationObject(self::x5c(...$certificates($attestation)), $attestation->authData);
 
         self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideNestedSequencePositions(): iterable
+    {
+        yield 'as the credential' => [false];
+        yield 'as the intermediate' => [true];
+    }
+
+    #[DataProvider('provideNestedSequencePositions')]
+    public function testNestedSequencesOverTheCertificateLimitAreRefusedBeforeTheyAreParsed(bool $asIntermediate): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $nested = self::nestedSequences(self::NESTED_SEQUENCES_LENGTH);
+        $certificates = $asIntermediate ? [$attestation->credentialDer, $nested] : [$nested, $attestation->intermediateDer];
+        $cbor = self::attestationObject(self::x5c(...$certificates), $attestation->authData);
+
+        self::assertLessThanOrEqual(self::MAX_LENGTH, mb_strlen($cbor, '8bit'));
+        self::assertRefusedCheaply(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
     }
 
     public function testIntermediateWithAnotherCaInAppendedPemFailsTheChain(): void
@@ -487,6 +548,56 @@ final class AttestationVerifierTest extends TestCase
         )];
         yield 'x5c holding an integer' => [static fn(BuiltAttestation $a): string => self::attestationObject(ListObject::create([ByteStringObject::create($a->credentialDer), UnsignedIntegerObject::create(1)]), $a->authData)];
         yield 'no authData' => [static fn(BuiltAttestation $a): string => self::attestationObject(self::x5c($a->credentialDer, $a->intermediateDer), null)];
+        yield 'fmt tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'fmt')];
+        yield 'attStmt tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'attStmt')];
+        yield 'x5c tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'x5c')];
+        yield 'credential certificate tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'credential')];
+        yield 'intermediate certificate tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'intermediate')];
+        yield 'receipt tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'receipt')];
+        yield 'authData tagged' => [static fn(BuiltAttestation $a): string => self::attestationObjectTagging($a, 'authData')];
+    }
+
+    public function testDocumentWithNoMemberTaggedIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation, cbor: self::attestationObjectTagging($attestation, null))->keyId);
+    }
+
+    public function testAttestationWithinTheSizeLimitIsAccepted(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of(['padding' => ExtensionsMap::text(str_repeat('a', 14000))]))
+            ->build();
+
+        self::assertLessThanOrEqual(self::MAX_LENGTH, mb_strlen($attestation->cbor, '8bit'));
+        self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
+    }
+
+    public function testAttestationOverTheSizeLimitIsMalformed(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions(ExtensionsMap::of(['padding' => ExtensionsMap::text(str_repeat('a', self::MAX_LENGTH))]))
+            ->build();
+
+        self::assertFailure(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation));
+    }
+
+    public function testHostileDocumentIsRefusedBeforeItIsDecoded(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $cbor = "\xa1" . (string) TextStringObject::create('fmt') . HostileInput::indefiniteListOfEmptyLists(self::HOSTILE_ITEMS);
+
+        self::assertRefusedCheaply(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
+    public function testHostileExtensionsAreaIsRefusedBeforeItIsDecoded(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withExtensions(HostileInput::indefiniteListOfEmptyLists(self::HOSTILE_ITEMS))
+            ->build();
+
+        self::assertRefusedCheaply(AttestationFailureReason::Format, static fn() => self::verifyBuilt($attestation));
     }
 
     /**
@@ -648,6 +759,8 @@ final class AttestationVerifierTest extends TestCase
         yield 'fmt twice' => [[TextStringObject::create('fmt'), TextStringObject::create(AttestationBuilder::FORMAT)], []];
         yield 'authData twice' => [[TextStringObject::create('authData'), ByteStringObject::create('value')], []];
         yield 'receipt twice' => [[], [TextStringObject::create('receipt'), ByteStringObject::create('value')]];
+        yield 'an integer key in a map nested in the document' => [[TextStringObject::create('extra'), MapObject::create()->add(UnsignedIntegerObject::create(1), ByteStringObject::create('value'))], []];
+        yield 'a byte-string key in a map nested in attStmt' => [[], [TextStringObject::create('extra'), MapObject::create()->add(ByteStringObject::create('key'), ByteStringObject::create('value'))]];
     }
 
     /**
@@ -835,6 +948,16 @@ final class AttestationVerifierTest extends TestCase
             ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
             ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('2.1'),
         ])];
+        yield 'beside a nested map with integer keys' => [ExtensionsMap::of([
+            'other' => MapObject::create()->add(UnsignedIntegerObject::create(1), UnsignedIntegerObject::create(2)),
+            ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
+            ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+        ])];
+        yield 'beside a list holding a map with a byte-string key' => [ExtensionsMap::of([
+            ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryBytes(4),
+            'other' => ListObject::create([MapObject::create()->add(ByteStringObject::create('key'), UnsignedIntegerObject::create(2))]),
+            ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('2.1'),
+        ])];
     }
 
     #[DataProvider('provideCategoryEncodings')]
@@ -871,7 +994,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'restricted 8' => [8];
         yield 'restricted 9' => [9];
         yield 'eleven' => [11];
-        yield 'largest UInt32' => [0xFFFFFFFF];
+        yield 'largest UInt32' => [self::MAX_UINT32];
     }
 
     #[DataProvider('provideUnknownCategories')]
@@ -900,6 +1023,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'negative integer' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => NegativeIntegerObject::create(-4), ExtensionsMap::BUNDLE_VERSION => MapObject::create()])];
         yield 'text' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::text('4'), ExtensionsMap::BUNDLE_VERSION => NegativeIntegerObject::create(-1)])];
         yield 'indefinite-length text' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => IndefiniteLengthTextStringObject::create()->append("\x04\x00\x00\x00")])];
+        yield 'tagged' => [ExtensionsMap::of([ExtensionsMap::VALIDATION_CATEGORY => Tagged::of(ExtensionsMap::categoryBytes(4)), ExtensionsMap::BUNDLE_VERSION => Tagged::of(ExtensionsMap::text('2.1'))])];
     }
 
     #[DataProvider('provideValuesOfTheWrongType')]
@@ -1095,6 +1219,16 @@ final class AttestationVerifierTest extends TestCase
     /**
      * @param callable(): mixed $verification
      */
+    private static function assertRefusedCheaply(AttestationFailureReason $reason, callable $verification): void
+    {
+        $growth = HostileInput::peakMemoryGrowthOf(static fn() => self::assertFailure($reason, $verification));
+
+        self::assertLessThan(HostileInput::CHEAP_REFUSAL_MEMORY, $growth, 'The attestation must be refused before it is parsed.');
+    }
+
+    /**
+     * @param callable(): mixed $verification
+     */
     private static function assertFailure(AttestationFailureReason $reason, callable $verification): void
     {
         try {
@@ -1168,6 +1302,26 @@ final class AttestationVerifierTest extends TestCase
             ->add($key('fmt'), $string('fmt', AttestationBuilder::FORMAT, true))
             ->add($key('attStmt'), $attStmt)
             ->add($key('authData'), $string('authData', $attestation->authData));
+    }
+
+    /**
+     * The attestation with $tagged, a member or a certificate, wrapped in a CBOR tag.
+     */
+    private static function attestationObjectTagging(BuiltAttestation $attestation, ?string $tagged): string
+    {
+        $item = static fn(string $member, CBORObject $value): CBORObject => $member === $tagged ? Tagged::of($value) : $value;
+        $x5c = ListObject::create([
+            $item('credential', ByteStringObject::create($attestation->credentialDer)),
+            $item('intermediate', ByteStringObject::create($attestation->intermediateDer)),
+        ]);
+        $attStmt = MapObject::create()
+            ->add(TextStringObject::create('x5c'), $item('x5c', $x5c))
+            ->add(TextStringObject::create('receipt'), $item('receipt', ByteStringObject::create($attestation->receipt)));
+
+        return (string) MapObject::create()
+            ->add(TextStringObject::create('fmt'), $item('fmt', TextStringObject::create(AttestationBuilder::FORMAT)))
+            ->add(TextStringObject::create('attStmt'), $item('attStmt', $attStmt))
+            ->add(TextStringObject::create('authData'), $item('authData', ByteStringObject::create($attestation->authData)));
     }
 
     /**

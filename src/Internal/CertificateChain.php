@@ -74,9 +74,9 @@ final readonly class CertificateChain
 
         if (
             $rootDer === null
-            || !self::isOneSequence($rootDer)
-            || !self::isOneSequence($intermediateDer, self::MAX_LENGTH)
-            || !self::isOneSequence($credentialDer, self::MAX_LENGTH)
+            || !Der::isOneSequence($rootDer)
+            || !Der::isOneSequence($intermediateDer, self::MAX_LENGTH)
+            || !Der::isOneSequence($credentialDer, self::MAX_LENGTH)
         ) {
             return null;
         }
@@ -105,40 +105,6 @@ final readonly class CertificateChain
         } catch (Throwable) {
             return null;
         }
-    }
-
-    /**
-     * Whether the bytes are one DER SEQUENCE with a definite length and nothing after it.
-     *
-     * @psalm-pure
-     */
-    private static function isOneSequence(string $der, int $maxLength = PHP_INT_MAX): bool
-    {
-        $length = mb_strlen($der, '8bit');
-
-        if ($length < 2 || $length > $maxLength || ord($der[0]) !== 0x30) {
-            return false;
-        }
-
-        $first = ord($der[1]);
-
-        if ($first < 0x80) {
-            return $length === 2 + $first;
-        }
-
-        $lengthBytes = $first & 0x7F;
-
-        if ($lengthBytes === 0 || $lengthBytes > 4 || $length < 2 + $lengthBytes) {
-            return false;
-        }
-
-        $contentLength = 0;
-
-        for ($i = 2; $i < 2 + $lengthBytes; ++$i) {
-            $contentLength = ($contentLength << 8) | ord($der[$i]);
-        }
-
-        return $length === 2 + $lengthBytes + $contentLength;
     }
 
     private static function issuedAndValid(string $der, X509 $issuer, DateTimeInterface $time): ?X509

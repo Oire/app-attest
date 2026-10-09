@@ -29,7 +29,9 @@ use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
 use Oire\AppAttest\Tests\Support\ExtensionsMap;
+use Oire\AppAttest\Tests\Support\HostileInput;
 use Oire\AppAttest\Tests\Support\Pem;
+use Oire\AppAttest\Tests\Support\Tagged;
 use Oire\AppAttest\Tests\Support\TestApp;
 use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
@@ -61,6 +63,9 @@ final class AssertionVerifierTest extends TestCase
     private const string CLIENT_DATA = '{"challenge":"c2luZ2xlLXVzZQ","action":"test"}';
     private const string MUTATED_VECTOR = 'veehaitch-ios-14.4';
     private const int MAX_COUNTER = 0xFFFFFFFF;
+    private const int MAX_UINT32 = 0xFFFFFFFF;
+    private const int MAX_LENGTH = 4096;
+    private const int HOSTILE_ITEMS = 600_000;
 
     /**
      * @return iterable<string, array{AssertionVector}>
@@ -234,6 +239,14 @@ final class AssertionVerifierTest extends TestCase
             ByteStringObject::create($a->signature),
             ListObject::create([ByteStringObject::create($a->authenticatorData)]),
         )];
+        yield 'signature tagged' => [static fn(AssertionParts $a): string => self::assertionObject(
+            Tagged::of(ByteStringObject::create($a->signature)),
+            ByteStringObject::create($a->authenticatorData),
+        )];
+        yield 'authenticatorData tagged' => [static fn(AssertionParts $a): string => self::assertionObject(
+            ByteStringObject::create($a->signature),
+            Tagged::of(ByteStringObject::create($a->authenticatorData)),
+        )];
         yield 'truncated' => [static fn(AssertionParts $a): string => mb_substr(
             self::assertionObject(ByteStringObject::create($a->signature), ByteStringObject::create($a->authenticatorData)),
             0,
@@ -270,6 +283,36 @@ final class AssertionVerifierTest extends TestCase
     public function testGarbageIsMalformed(string $cbor): void
     {
         self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt(AssertionBuilder::create(), cbor: $cbor));
+    }
+
+    public function testAssertionWithinTheSizeLimitIsAccepted(): void
+    {
+        $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of(['padding' => ExtensionsMap::text(str_repeat('a', 3800))]));
+
+        self::assertLessThanOrEqual(self::MAX_LENGTH, mb_strlen($builder->build(self::CLIENT_DATA), '8bit'));
+        self::assertSame(1, self::verifyBuilt($builder));
+    }
+
+    public function testAssertionOverTheSizeLimitIsMalformed(): void
+    {
+        $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of(['padding' => ExtensionsMap::text(str_repeat('a', self::MAX_LENGTH))]));
+
+        self::assertFailure(AssertionFailureReason::Format, static fn() => self::verifyBuilt($builder));
+    }
+
+    public function testHostileDocumentIsRefusedBeforeItIsDecoded(): void
+    {
+        $cbor = "\xa1" . (string) TextStringObject::create('signature') . HostileInput::indefiniteListOfEmptyLists(self::HOSTILE_ITEMS);
+
+        self::assertRefusedCheaply(static fn() => self::verifyBuilt(AssertionBuilder::create(), cbor: $cbor));
+    }
+
+    public function testHostileExtensionsAreaIsRefusedBeforeItIsDecoded(): void
+    {
+        $builder = AssertionBuilder::create()->withExtensions(HostileInput::indefiniteListOfEmptyLists(self::HOSTILE_ITEMS));
+        $cbor = $builder->build(self::CLIENT_DATA);
+
+        self::assertRefusedCheaply(static fn() => self::verifyBuilt($builder, cbor: $cbor));
     }
 
     #[DataProvider('provideGenuineVectors')]
@@ -358,6 +401,7 @@ final class AssertionVerifierTest extends TestCase
         yield 'a map key' => [[MapObject::create(), ByteStringObject::create('value')]];
         yield 'signature twice' => [[TextStringObject::create('signature'), ByteStringObject::create('value')]];
         yield 'authenticatorData twice' => [[TextStringObject::create('authenticatorData'), ByteStringObject::create('value')]];
+        yield 'an integer key in a nested map' => [[TextStringObject::create('extra'), MapObject::create()->add(UnsignedIntegerObject::create(1), ByteStringObject::create('value'))]];
     }
 
     /**
@@ -496,6 +540,11 @@ final class AssertionVerifierTest extends TestCase
             ExtensionsMap::VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(2),
             ExtensionsMap::BUNDLE_VERSION => ExtensionsMap::text('4.2'),
         ])];
+        yield 'beside a nested map with integer keys' => [ExtensionsMap::of([
+            'other' => MapObject::create()->add(UnsignedIntegerObject::create(1), UnsignedIntegerObject::create(2)),
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(2),
+            ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('4.2'),
+        ])];
     }
 
     #[DataProvider('provideLaunchValueEncodings')]
@@ -517,7 +566,7 @@ final class AssertionVerifierTest extends TestCase
 
     public function testUnknownCategoryIsNeverAllowed(): void
     {
-        foreach ([0, 7, 8, 9, 11, self::MAX_COUNTER] as $category) {
+        foreach ([0, 7, 8, 9, 11, self::MAX_UINT32] as $category) {
             $builder = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger($category)]));
 
             self::assertSame(1, self::verifyBuilt($builder));
@@ -541,6 +590,10 @@ final class AssertionVerifierTest extends TestCase
         ])];
         yield 'category above UInt32' => [ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => UnsignedIntegerObject::create(0x100000002)])];
         yield 'category of three bytes' => [ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ByteStringObject::create("\x02\x00\x00")])];
+        yield 'tagged values' => [ExtensionsMap::of([
+            ExtensionsMap::SHORT_VALIDATION_CATEGORY => Tagged::of(ExtensionsMap::categoryInteger(2)),
+            ExtensionsMap::SHORT_BUNDLE_VERSION => Tagged::of(ExtensionsMap::text('4.2')),
+        ])];
     }
 
     #[DataProvider('provideExtensionsWithoutUsableValues')]
@@ -560,12 +613,12 @@ final class AssertionVerifierTest extends TestCase
     {
         $versionOnly = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_BUNDLE_VERSION => ExtensionsMap::text('5')]));
         $categoryOnly = AssertionBuilder::create()->withExtensions(ExtensionsMap::of([ExtensionsMap::SHORT_VALIDATION_CATEGORY => ExtensionsMap::categoryInteger(4)]));
-        $anyVersion = (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version === '5');
+        $versionFive = (new LaunchPolicy())->withBundleVersion(static fn(string $version): bool => $version === '5');
 
-        self::assertSame(1, self::verifyBuilt($versionOnly, launchPolicy: $anyVersion));
+        self::assertSame(1, self::verifyBuilt($versionOnly, launchPolicy: $versionFive));
         self::assertFailure(AssertionFailureReason::ValidationCategory, static fn() => self::verifyBuilt($versionOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
         self::assertSame(1, self::verifyBuilt($categoryOnly, launchPolicy: LaunchPolicy::allowing(ValidationCategory::AppStore)));
-        self::assertFailure(AssertionFailureReason::BundleVersion, static fn() => self::verifyBuilt($categoryOnly, launchPolicy: $anyVersion));
+        self::assertFailure(AssertionFailureReason::BundleVersion, static fn() => self::verifyBuilt($categoryOnly, launchPolicy: $versionFive));
     }
 
     public function testLaunchPolicyIsCheckedAfterEveryOtherCheck(): void
@@ -625,6 +678,16 @@ final class AssertionVerifierTest extends TestCase
             TestApp::identity(),
             $launchPolicy,
         );
+    }
+
+    /**
+     * @param callable(): mixed $verification
+     */
+    private static function assertRefusedCheaply(callable $verification): void
+    {
+        $growth = HostileInput::peakMemoryGrowthOf(static fn() => self::assertFailure(AssertionFailureReason::Format, $verification));
+
+        self::assertLessThan(HostileInput::CHEAP_REFUSAL_MEMORY, $growth, 'The assertion must be refused before it is decoded.');
     }
 
     /**

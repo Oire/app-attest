@@ -94,4 +94,10 @@ final class LaunchPolicyTest extends TestCase
         /** @psalm-suppress InvalidArgument */
         new LaunchPolicy([4]);
     }
+
+    public function testAllowingNoCategoryIsACallerError(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        LaunchPolicy::allowing();
+    }
 }

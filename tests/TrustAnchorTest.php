@@ -6,6 +6,8 @@ namespace Oire\AppAttest\Tests;
 
 use InvalidArgumentException;
 use LogicException;
+use Oire\AppAttest\Tests\Support\Damage;
+use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\Pem;
 use Oire\AppAttest\TrustAnchor;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -83,6 +85,31 @@ final class TrustAnchorTest extends TestCase
         yield 'not base64' => ["-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n"];
         yield 'not a certificate' => ["-----BEGIN CERTIFICATE-----\nZ2FyYmFnZQ==\n-----END CERTIFICATE-----\n"];
         yield 'two certificates' => [self::bundledRoot() . self::bundledRoot()];
+        yield 'a certificate with a trailing byte' => [Pem::fromDer(Pem::toDer(self::bundledRoot()) . "\x00", Pem::CERTIFICATE)];
+        yield 'an indefinite-length certificate' => [Pem::fromDer("\x30\x80" . mb_substr(Pem::toDer(self::bundledRoot()), 4, null, '8bit') . "\x00\x00", Pem::CERTIFICATE)];
+        yield 'an empty sequence' => [Pem::fromDer("\x30\x00", Pem::CERTIFICATE)];
+        yield 'a sequence holding an integer' => [Pem::fromDer("\x30\x03\x02\x01\x00", Pem::CERTIFICATE)];
+    }
+
+    public function testDamagedRootIsRefusedWithoutAPhpError(): void
+    {
+        $outcomes = Damage::withoutPhpErrors(static fn(): array => array_map(
+            static fn(Damaged $d): string => self::fromPemOutcome(Pem::fromDer($d->bytes, Pem::CERTIFICATE)),
+            Damage::of(Pem::toDer(self::bundledRoot()), [0x01, 0x80, 0xFF], 3),
+        ));
+
+        self::assertContains('refused', $outcomes);
+    }
+
+    private static function fromPemOutcome(string $pem): string
+    {
+        try {
+            TrustAnchor::fromPem($pem);
+
+            return 'accepted';
+        } catch (InvalidArgumentException) {
+            return 'refused';
+        }
     }
 
     private static function bundledRoot(): string

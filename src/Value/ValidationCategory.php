@@ -35,9 +35,6 @@ enum ValidationCategory: int
      */
     case Platform = 1;
 
-    /**
-     * An executable distributed through TestFlight.
-     */
     case TestFlight = 2;
 
     /**
@@ -45,9 +42,6 @@ enum ValidationCategory: int
      */
     case Development = 3;
 
-    /**
-     * An executable distributed through the App Store.
-     */
     case AppStore = 4;
 
     /**
@@ -55,9 +49,6 @@ enum ValidationCategory: int
      */
     case Enterprise = 5;
 
-    /**
-     * An executable signed with Developer ID.
-     */
     case DeveloperId = 6;
 
     /**

@@ -43,7 +43,8 @@ use UnexpectedValueException;
  * CborText, unsigned integers that fit become ints, lists become lists and maps become CborMap, so a map
  * never passes for a list whatever its keys. Any other value, such as a negative integer or a tag, becomes
  * null, so it cannot pass for what the document needs. A map with a key that is not a text string, or with
- * the same key twice, makes the whole document refused.
+ * the same key twice, makes the whole document refused, unless the map is nested and the caller asked for
+ * nested maps to be read leniently: such a map then becomes null.
  *
  * @internal
  */
@@ -51,20 +52,17 @@ final class Cbor
 {
     /**
      * The map the bytes encode, or null if they do not encode exactly one map with nothing after it, or if
-     * any map in it has a key that is not a text string or a key twice.
+     * that map has a key that is not a text string or a key twice. A nested map with such a key refuses the
+     * whole document too, or, if $lenientNestedMaps is set, becomes null.
      */
-    public static function tryDecodeMap(string $bytes): ?CborMap
+    public static function tryDecodeMap(string $bytes, bool $lenientNestedMaps = false): ?CborMap
     {
         try {
-            return ErrorGuard::call(static function() use ($bytes): ?CborMap {
+            return ErrorGuard::call(static function() use ($bytes, $lenientNestedMaps): ?CborMap {
                 $stream = new CborStream($bytes);
-                $object = Decoder::create()->decode($stream);
+                $map = self::convert(Decoder::create()->decode($stream), $lenientNestedMaps);
 
-                if ($stream->hasMore() || !($object instanceof MapObject || $object instanceof IndefiniteLengthMapObject)) {
-                    return null;
-                }
-
-                return self::convertMap($object);
+                return !$stream->hasMore() && $map instanceof CborMap ? $map : null;
             });
         } catch (Throwable) {
             return null;
@@ -90,11 +88,12 @@ final class Cbor
     }
 
     /**
-     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
+     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice,
+     *                                  unless $lenient is set
      *
      * @return string|int|CborText|CborMap|list<mixed>|null
      */
-    private static function convert(CBORObject $object): array|CborMap|CborText|int|string|null
+    private static function convert(CBORObject $object, bool $lenient): array|CborMap|CborText|int|string|null
     {
         return match (true) {
             $object instanceof UnsignedIntegerObject => filter_var($object->getValue(), FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE),
@@ -103,9 +102,9 @@ final class Cbor
             $object instanceof TextStringObject,
             $object instanceof IndefiniteLengthTextStringObject => new CborText($object->getValue()),
             $object instanceof ListObject,
-            $object instanceof IndefiniteLengthListObject => self::convertList($object),
+            $object instanceof IndefiniteLengthListObject => self::convertList($object, $lenient),
             $object instanceof MapObject,
-            $object instanceof IndefiniteLengthMapObject => self::convertMap($object),
+            $object instanceof IndefiniteLengthMapObject => self::convertMap($object, $lenient),
             default => null,
         };
     }
@@ -113,42 +112,46 @@ final class Cbor
     /**
      * @param iterable<CBORObject> $list
      *
-     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice
+     * @throws UnexpectedValueException if a map in it has a key that is not a text string or a key twice,
+     *                                  unless $lenient is set
      *
      * @return list<string|int|CborText|CborMap|list<mixed>|null>
      */
-    private static function convertList(iterable $list): array
+    private static function convertList(iterable $list, bool $lenient): array
     {
         $converted = [];
 
         foreach ($list as $item) {
-            $converted[] = self::convert($item);
+            $converted[] = self::convert($item, $lenient);
         }
 
         return $converted;
     }
 
     /**
+     * The map, or null if it has a key that is not a text string or a key twice and $lenient is set.
+     *
      * @param iterable<MapItem> $map
      *
-     * @throws UnexpectedValueException if the map has a key that is not a text string or a key twice
+     * @throws UnexpectedValueException if the map, or a map in it, has a key that is not a text string or a
+     *                                  key twice, unless $lenient is set
      */
-    private static function convertMap(iterable $map): CborMap
+    private static function convertMap(iterable $map, bool $lenient): ?CborMap
     {
         $entries = [];
 
         foreach ($map as $item) {
-            $key = self::convert($item->getKey());
+            $key = self::convert($item->getKey(), $lenient);
 
-            if (!$key instanceof CborText) {
-                throw new UnexpectedValueException('A map key is not a text string.');
+            if (!$key instanceof CborText || array_key_exists($key->value, $entries)) {
+                if ($lenient) {
+                    return null;
+                }
+
+                throw new UnexpectedValueException('A map key is not a text string, or is there twice.');
             }
 
-            if (array_key_exists($key->value, $entries)) {
-                throw new UnexpectedValueException('A map has the same key twice.');
-            }
-
-            $entries[$key->value] = self::convert($item->getValue());
+            $entries[$key->value] = self::convert($item->getValue(), $lenient);
         }
 
         return new CborMap($entries);

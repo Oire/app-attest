@@ -41,7 +41,8 @@ src/
   SystemClock.php           # Default PSR-20 clock
   Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey, ValidationCategory, LaunchPolicy
   Exception/                # AppAttestException (abstract), Attestation/AssertionException + reason enums
-  Internal/                 # @internal: Cbor, CborStream, CborText, CborMap, AuthenticatorData, Extensions, CertificateChain, EcPoint, NonceExtension, ErrorGuard
+  Internal/                 # @internal: Cbor, CborStream, CborText, CborMap, AuthenticatorData, Extensions,
+                            # CertificateChain, Der, EcPoint, NonceExtension, Pem, ErrorGuard
 resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
@@ -73,7 +74,9 @@ tests/
   bytes.
 - Failures are exceptions with a typed `$reason`, never `false` or a bare message. Messages name the check
   and never echo key material. Caller errors (bad PEM, counter outside 0..2^32−1, invalid team or bundle
-  id) are `InvalidArgumentException`, never an `AppAttestException`.
+  id, an `$allowed` that is empty or holds anything but `Environment` cases, a `LaunchPolicy` category that
+  is not a `ValidationCategory`, `LaunchPolicy::allowing()` with no category, a `TrustAnchor::fromPem()`
+  argument that is not one certificate) are `InvalidArgumentException`, never an `AppAttestException`.
 - Psalm dev-master's purity model reports `MissingPureAnnotation` and `MissingImmutableAnnotation`.
   Annotate as the issue suggests (`@psalm-pure`, `@psalm-immutable`, or `@psalm-capabilities read-props`
   on methods and promoted constructors that read properties) and never suppress it.
@@ -85,7 +88,11 @@ tests/
   the nonce sits in a signed certificate, so an edited vector fails at the nonce or the chain, not at the
   check under test. Reach failures through the verifiers' inputs or through the builders in
   `tests/Support/`.
-- PHPUnit fails on warnings and notices: malformed input must raise a typed failure, never a PHP warning.
+- PHPUnit fails on warnings, notices, deprecations and risky tests: malformed input must raise a typed
+  failure, never a PHP warning.
+- `phpunit.xml.dist` sets `memory_limit` to 128M, but a test of input built to exhaust memory must not
+  rely on it: CI may run with unlimited memory. Assert with `HostileInput::peakMemoryGrowthOf()` that the
+  input is refused before it is parsed.
 
 ## Things That Were Wrong Once
 
@@ -103,16 +110,21 @@ tests/
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.
 - The CBOR decoder keeps only strings, unsigned integers, lists and maps, so an integer or a tag where a
-  byte string belongs is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`, so neither passes
-  for the other; maps decode to `Internal\CborMap`, never to PHP arrays, so a map keyed `"0"`, `"1"`
-  cannot pass for a list. A key that is not a text string, a key twice, or bytes after the top-level map
-  make it refuse the whole document.
+  byte string belongs is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`,
+  so neither passes for the other; maps decode to `Internal\CborMap`, never to PHP arrays, so a map keyed
+  `"0"`, `"1"` cannot pass for a list. A key that is not a text string, a key twice, or bytes after the
+  top-level map make it refuse the whole document. Only the extensions area is decoded with
+  `lenientNestedMaps`, where such a nested map becomes null instead, so an unrelated entry cannot hide the
+  launch values.
+- cbor-php builds an object for every item, about 220 bytes of memory per input byte, so an unbounded
+  document stops PHP with an uncatchable out-of-memory error. Both verifiers refuse a document over their
+  `MAX_LENGTH` (16384 bytes for an attestation, 4096 for an assertion) before decoding it.
 - `apple_validation_category_01` and `apple_bundle_version_01` (`validationCategory` and `bundleVersion` in
   assertions) are entries of the `extensions` CBOR map in the authenticator data, after the COSE key, not
   certificate extensions. Only Apple's guide sample carries them (the category as four little-endian
   bytes), so they are reported and enforced only with a `LaunchPolicy`; a missing or malformed extensions
-  area is never a failure without one. `Cbor::tryItemLength()` skips the COSE key; the strict
-  `Cbor::tryDecodeMap()` reads the area after it.
+  area is never a failure without one. `Cbor::tryItemLength()` skips the COSE key; `Cbor::tryDecodeMap()`
+  reads the area after it, strict about the top-level keys and lenient about nested maps.
 - Only a single uncompressed P-256 `PUBLIC KEY` PEM is accepted by `AssertionVerifier`, decoded by the
   library itself, so OpenSSL never reads a file path.
 - Before a release, re-fetch Apple's root and compare its fingerprint with `TrustAnchor::APPLE_ROOT_SHA256`.

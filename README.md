@@ -117,8 +117,8 @@ try {
 `verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey`
 performs Apple's attestation steps in order:
 
-1. The document is an `apple-appattest` object with `attStmt.x5c`, `attStmt.receipt` and `authData`, and
-   `authData` is long enough for its layout.
+1. The document is at most 16384 bytes, an `apple-appattest` object with `attStmt.x5c`, `attStmt.receipt`
+   and `authData`, and `authData` is long enough for its layout.
 2. `x5c` holds exactly two certificates, the credential certificate and an intermediate. The intermediate
    is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, and all
    three are valid at the clock's time.
@@ -132,6 +132,8 @@ performs Apple's attestation steps in order:
 8. The `credentialId` in `authData` equals the key id.
 9. Only if you pass a `LaunchPolicy`: the validation category and the bundle version in `authData` pass it
    (see Launch Category and Bundle Version).
+
+`$allowed` lists the environments a key may come from, as `Environment` cases; it must not be empty.
 
 `$clientDataHash` may be any length: the verifier hashes whatever bytes you pass, so it only has to match
 what the app passed to `attestKey()`. Most apps pass the SHA-256 of the challenge; Apple's own sample in
@@ -182,7 +184,8 @@ try {
 `verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
 performs Apple's assertion steps 1 to 5 and returns the new counter:
 
-1. The document is an object with a `signature` and an `authenticatorData` of at least 37 bytes.
+1. The document is at most 4096 bytes, an object with a `signature` and an `authenticatorData` of at least
+   37 bytes.
 2. The signature is a valid ECDSA P-256 signature, with SHA-256, over the nonce: the SHA-256 of
    `authenticatorData` followed by the SHA-256 of `$clientData`. The device signs the nonce, so the nonce
    is hashed once more by ECDSA itself.
@@ -225,7 +228,7 @@ executable), `TestFlight` (2), `Development` (3, signed by a development identit
 generates in restricted situations and names none of them, so they have no case: `AttestedKey` still
 reports such a number in `$validationCategory`, and no policy allows it.
 
-Pass a `LaunchPolicy` as the last argument of either `verify()` to enforce them:
+Pass a `LaunchPolicy` as the last argument of `AttestationVerifier::verify()` to enforce them:
 
 ```php
 use Oire\AppAttest\Value\LaunchPolicy;
@@ -235,12 +238,23 @@ $policy = LaunchPolicy::allowing(ValidationCategory::AppStore, ValidationCategor
     ->withBundleVersion(static fn(string $version): bool => version_compare($version, '2.0', '>='));
 
 $key = $verifier->verify($attestation, $clientDataHash, $keyId, $app, [Environment::Production], $policy);
-$counter = (new AssertionVerifier())->verify($assertion, $clientData, $stored->publicKeyPem, $stored->counter, $app, $policy);
 ```
 
+`AssertionVerifier::verify()` takes a policy the same way, but think twice before you pass one. It returns
+only the counter, so you cannot see what an assertion carries without enforcing it, and no genuine
+assertion with these values has been published to test against (see below). If a device puts them in its
+attestation but not in its assertions, or spells them otherwise, every later assertion from it fails with
+`ValidationCategory` or `BundleVersion`. Enforcing the policy once, on the attestation, does not have
+this risk.
+
 * `LaunchPolicy::allowing(ValidationCategory ...$categories)` allows these categories and leaves the
-  bundle version unchecked; `new LaunchPolicy()` checks nothing, and
-  `new LaunchPolicy($categories, $acceptsBundleVersion)` takes both parts at once.
+  bundle version unchecked. It needs at least one category: called with none, for example with an empty
+  array from your configuration spread into it, it throws an `InvalidArgumentException` rather than turn
+  the category check off.
+* `new LaunchPolicy()` checks nothing, and `new LaunchPolicy($categories, $acceptsBundleVersion)` takes
+  both parts at once. Its empty category list means that the category is not checked at all: every
+  category passes, an absent one too. If you build that list from configuration, refuse an empty one
+  yourself.
 * `withBundleVersion(Closure $accepts)` returns a copy that also requires a bundle version for which the
   closure returns `true`.
 * With a policy that lists categories, a category that is absent, has no enum case or is not listed fails
@@ -252,8 +266,10 @@ The values are read leniently, because Apple documents only their names and type
 when it is four little-endian bytes (as in Apple's sample) or a CBOR unsigned integer of at most
 2^32 − 1; the bundle version when it is a text string. Both verifiers accept both spellings,
 `apple_validation_category_01` or `validationCategory` and `apple_bundle_version_01` or `bundleVersion`;
-when both hold a usable value, the `apple_…_01` one wins. A value of another type, or an extensions area that is not exactly one CBOR map
-with distinct text-string keys and nothing after it, counts as absent.
+when both hold a usable value, the `apple_…_01` one wins. A value of another type, or an extensions area
+that is not exactly one CBOR map with distinct text-string keys and nothing after it, counts as absent.
+That rule applies to the keys of the extensions map itself: a map nested in another entry, whatever its
+keys, does not hide the launch values.
 
 Apple's own attestation sample carries category 1 and bundle version `"1"`, and the library reports both.
 No genuine assertion sample with these values exists, so the assertion side is tested only with
@@ -281,10 +297,11 @@ log. Do not send them to the client: refuse with a generic answer.
 
 `Oire\AppAttest\Exception\AttestationFailureReason`:
 
-* `Format` — the document is not a well-formed `apple-appattest` object, `authData` is too short, or the
-  credential certificate does not hold an uncompressed P-256 key. The document must be one CBOR map with
-  nothing after it, the keys of every map in it distinct text strings, `x5c` an array, `fmt` a text
-  string, and `x5c`'s entries, `receipt` and `authData` byte strings.
+* `Format` — the document is longer than 16384 bytes (Apple's are about 6 KB) or not a well-formed
+  `apple-appattest` object, `authData` is too short, or the credential certificate does not hold an
+  uncompressed P-256 key. The document must be one CBOR map with nothing after it, the keys of every map
+  in it distinct text strings, `x5c` an array, `fmt` a text string, and `x5c`'s entries, `receipt` and
+  `authData` byte strings.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
   an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is not exactly
   one DER `SEQUENCE` with nothing after it, or is longer than 4096 bytes (Apple's are about 1 KiB).
@@ -304,9 +321,9 @@ log. Do not send them to the client: refuse with a generic answer.
 
 `Oire\AppAttest\Exception\AssertionFailureReason`:
 
-* `Format` — the document is not an object with a `signature` and 37 bytes of `authenticatorData`. It
-  must be one CBOR map with nothing after it, the keys of every map in it distinct text strings and both
-  members byte strings.
+* `Format` — the document is longer than 4096 bytes (Apple's are about 140) or not an object with a
+  `signature` and at least 37 bytes of `authenticatorData`. It must be one CBOR map with nothing after it,
+  the keys of every map in it distinct text strings and both members byte strings.
 * `Signature` — the signature does not verify with the public key over this client data.
 * `RpIdHash` — the assertion was made for another team or bundle.
 * `Counter` — the counter did not grow: a replayed or reordered assertion.
@@ -322,7 +339,10 @@ cannot be mistaken for a forged request:
 * a `BundleId` that is empty or holds anything but ASCII letters, digits, hyphens and periods;
 * a `$publicKeyPem` that is not one uncompressed P-256 `PUBLIC KEY` PEM block;
 * a `$previousCounter` outside 0 to 2^32 − 1;
-* a `LaunchPolicy` category list holding anything but `ValidationCategory` cases;
+* an `$allowed` that is empty or holds anything but `Environment` cases, such as the strings
+  `'production'` or `'development'`;
+* a `LaunchPolicy` category list holding anything but `ValidationCategory` cases, and
+  `LaunchPolicy::allowing()` called with no category;
 * a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate.
 
 A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
@@ -452,8 +472,7 @@ $counter = (new AssertionVerifier())->verify($assertion, $clientData, $publicKey
 A signature over the bare `authenticatorData` followed by the SHA-256 of `clientData`, without hashing
 them into the nonce first, is refused with `Signature`. To test a `LaunchPolicy`, append a CBOR map such as
 `{"validationCategory": 4, "bundleVersion": "2.1"}` to the 37 bytes of `authenticatorData` before forming
-the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library
-already requires.
+the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library already requires.
 
 Attestations are harder to make, because they need a certificate chain with the nonce extension. This
 repository's test-only
@@ -467,7 +486,7 @@ test code is not part of the Composer package.
 
 * `AttestationVerifier::__construct(?TrustAnchor $root = null, ?ClockInterface $clock = null)`
 * `AttestationVerifier::verify(string $attestationCbor, string $clientDataHash, string $keyId, AppIdentity $app, array $allowed, ?LaunchPolicy $launchPolicy = null): AttestedKey`,
-  where `$allowed` is a list of `Environment` cases
+  where `$allowed` is a non-empty list of `Environment` cases
 * `AssertionVerifier::verify(string $assertionCbor, string $clientData, string $publicKeyPem, int $previousCounter, AppIdentity $app, ?LaunchPolicy $launchPolicy = null): int`
 * `TrustAnchor::apple(): TrustAnchor` and `TrustAnchor::fromPem(string $pem): TrustAnchor`
 * `TrustAnchor::APPLE_ROOT_SHA256`, the pinned fingerprint as lowercase hexadecimal, and

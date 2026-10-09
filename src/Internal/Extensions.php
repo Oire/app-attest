@@ -24,8 +24,9 @@ namespace Oire\AppAttest\Internal;
 /**
  * The launch values in the extensions map of authenticator data: the validation category, a UInt32 given as
  * four little-endian bytes or as an unsigned integer, and the bundle version, a text string. A value of any
- * other type, or an extensions area that is not exactly one well-formed map, counts as absent. Each value is
- * read under its first spelling that holds a usable one.
+ * other type, or an extensions area that is not exactly one well-formed map with distinct text-string keys,
+ * counts as absent. A nested map in another entry may have keys of any type: it never hides the launch
+ * values. Each value is read under its first spelling that holds a usable one.
  *
  * @internal
  */
@@ -34,7 +35,6 @@ final readonly class Extensions
     private const array VALIDATION_CATEGORY_KEYS = ['apple_validation_category_01', 'validationCategory'];
     private const array BUNDLE_VERSION_KEYS = ['apple_bundle_version_01', 'bundleVersion'];
     private const int UINT32_LENGTH = 4;
-    private const int MAX_UINT32 = 0xFFFFFFFF;
 
     /**
      * @psalm-capabilities read-props
@@ -57,7 +57,7 @@ final readonly class Extensions
      */
     public static function fromArea(string $bytes): self
     {
-        $map = $bytes === '' ? null : Cbor::tryDecodeMap($bytes);
+        $map = $bytes === '' ? null : Cbor::tryDecodeMap($bytes, lenientNestedMaps: true);
 
         if ($map === null) {
             return self::none();
@@ -84,7 +84,7 @@ final readonly class Extensions
     private static function uint32(mixed $value): ?int
     {
         if (is_int($value)) {
-            return $value <= self::MAX_UINT32 ? $value : null;
+            return $value <= AuthenticatorData::MAX_UINT32 ? $value : null;
         }
 
         if (!is_string($value) || mb_strlen($value, '8bit') !== self::UINT32_LENGTH) {

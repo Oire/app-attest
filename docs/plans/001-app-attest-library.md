@@ -25,6 +25,9 @@ to the caller, who passes the stored public key and counter in and stores the ne
 - [x] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
       a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
       each with its own `$reason`
+- [x] ➕ both verifiers report the launch validation category and bundle version from the authenticator
+      data extensions and, only with a `LaunchPolicy`, refuse them with `ValidationCategory` and
+      `BundleVersion`; without a policy every earlier result is unchanged (Task 7)
 - [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
 - [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
@@ -86,6 +89,10 @@ The repository's `compose.yaml` gives a PHP 8.5 CLI container for machines witho
 - **`authenticatorData` layout** (big-endian): `rpIdHash` 32 bytes | flags 1 | signCount 4 | then, in an
   attestation only, `aaguid` 16 | credentialId length 2 | credentialId | the COSE public key. An
   assertion's is exactly 37 bytes. Anything shorter than its layout requires is `Format`.
+  ⚠️ An assertion's `authenticatorData` is at least 37 bytes: newer OS versions append an `extensions`
+  CBOR map after them, and after the COSE key in an attestation; Apple's attestation list continues past
+  step 9 with the launch category and bundle version checks, and its assertion steps 7 and 8 do the same
+  (➕ Task 7, plan execution, 2026-10-09)
 - **The nonce extension** (OID `1.2.840.113635.100.8.2`) holds DER `SEQUENCE { [1] EXPLICIT OCTET STRING
   (32 bytes) }`, not a bare octet string, and phpseclib does not know the OID.
 - **Apple identifiers:** a team id is 10 uppercase letters and digits; a bundle id is non-empty and
@@ -129,6 +136,9 @@ Dependencies (Composer; versions pinned to majors):
   caller maps them without parsing text. Messages name the check, never echo key material. A caller
   error — an unparsable `$publicKeyPem`, a `$previousCounter` outside 0..2^32−1, an invalid team or
   bundle id — is an `InvalidArgumentException`, never a verification failure.
+  ⚠️ So is an `$allowed` that is empty or holds anything but `Environment` cases, a `LaunchPolicy`
+  category that is not a `ValidationCategory`, `LaunchPolicy::allowing()` with no category, and a
+  `TrustAnchor::fromPem()` argument that is not exactly one certificate (review, 2026-10-09)
 - **Binary safety:** bytes are sliced with `mb_substr(…, '8bit')`, measured with `mb_strlen(…, '8bit')`,
   or read with `unpack()` (`'N'` and `'n'` for the big-endian counter and length); hashes and ids are
   compared with `hash_equals`. A plain `substr` would be rewritten by the code style.
@@ -327,12 +337,24 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
   `AttestationBuilder`), `src/Internal/ErrorGuard.php` (turns PHP warnings from parsing untrusted bytes
   into exceptions); Modify: `tests/Support/AttestationBuilder.php`, `phpunit.xml.dist` (`failOnWarning`,
   `failOnNotice`) (plan execution, 2026-10-09)
+- ➕ Create: `src/Internal/CborText.php`, `src/Internal/CborMap.php`, `src/Internal/Pem.php`,
+  `src/Internal/Der.php`, `tests/Support/Tagged.php`, `tests/Support/HostileInput.php` (review rounds,
+  2026-10-09)
 
 #### Steps
 - [x] `verify(attestationCbor, clientDataHash, keyId, app, allowed)` in Apple's order, each failure an
       `AttestationException` with the reason named:
       1. decode CBOR `{fmt: "apple-appattest", attStmt: {x5c, receipt}, authData}` — any decoder
          exception, a wrong `fmt`, a missing member or a short `authData` is `Format`;
+         ⚠️ Tightened after the Codex review: the document must be exactly one CBOR map with nothing
+         after it; byte strings decode to strings and text strings to `Internal\CborText`, so `fmt` must
+         be text and `x5c`'s entries, `receipt`, `authData`, `signature` and `authenticatorData` bytes;
+         maps decode to `Internal\CborMap`, so a map keyed "0", "1" is not a list; a key that is not a
+         text string, or a key twice, in any map refuses the document as `Format` (review, 2026-10-09)
+         ⚠️ An attestation longer than 16384 bytes (genuine ones are 5.3 to 5.9 KB) and an assertion
+         longer than 4096 bytes (genuine ones are about 140) are `Format` before decoding: cbor-php
+         spends about 220 bytes of memory per input byte, so a document of about 600 KB ended the
+         process with an uncatchable out-of-memory error (review, 2026-10-09)
       2. `x5c` holds **exactly two** certificates (credential, intermediate); build the chain to the
          trust anchor with phpseclib, each certificate valid at the clock's time, the intermediate a CA
          (its `basicConstraints` `cA` flag, checked by the library itself) — else `CertificateChain`;
@@ -400,7 +422,8 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       library itself and checked with `Internal\EcPoint`, so a path such as `file://…`, a certificate, a
       private key, an RSA or P-384 key, or a point off the curve is an `InvalidArgumentException` and
       OpenSSL never reads a file. `authenticatorData` longer than 37 bytes is not refused; only its first
-      37 are read (plan execution, 2026-10-09)
+      37 are read (plan execution, 2026-10-09). Since ➕ Task 7 the bytes after the 37 are read as the
+      extensions area, and only a policy enforces them.
 - [x] `clientData` is the caller's raw bytes; the library never parses it (what it contains is the
       caller's protocol — Apple's assertion step 6, checking the challenge inside it, is the caller's)
 - [x] tests: every genuine vector accepted with its counter; builder assertions accepted; a flipped
@@ -479,7 +502,8 @@ request, so every existing call keeps its behavior.
       ⚠️ `Cbor::tryItemLength()` decodes the COSE key through `Internal\CborStream` and returns the bytes
       it took (any content, integer keys included); everything after it is the extensions area, read with
       the strict `Cbor::tryDecodeMap()`, so it yields values only when it is exactly one map with distinct
-      text-string keys and nothing after it. A COSE key that does not decode yields no values. Both
+      text-string keys and nothing after it. After review, a nested map in another entry may have keys of
+      any type (`lenientNestedMaps`): it becomes null instead of hiding the launch values. A COSE key that does not decode yields no values. Both
       verifiers accept both spellings; when both hold a usable value, the `apple_…_01` one wins. The
       decoder now keeps unsigned integers that fit a PHP int, which cannot pass for any document member.
       `AuthenticatorData`, `Extensions` and `LaunchPolicy` are `readonly` but not `@psalm-immutable`: the
@@ -510,6 +534,9 @@ request, so every existing call keeps its behavior.
       `acceptsBundleVersion(?string)`, which both verifiers call; the closure passes only when it returns
       `true`, and a category list entry that is not a `ValidationCategory` is an
       `InvalidArgumentException` (plan execution, 2026-10-09)
+      ⚠️ `allowing()` with no category is an `InvalidArgumentException`, so an empty configuration spread
+      into it cannot turn the check off; the constructor's empty list still means "not checked"
+      (review, 2026-10-09)
 - [x] both `verify()` methods take a trailing `?LaunchPolicy $launchPolicy = null`. With null, nothing
       changes. With a policy, a category that is absent, unknown or not allowed is the new reason
       `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
@@ -620,9 +647,9 @@ enum AssertionFailureReason { case Format; case Signature; case RpIdHash; case C
 `$keyId` and `$clientDataHash` are raw bytes; callers decode their transport encoding — base64url, as
 the README recommends — before calling. Apple's `generateKey()` hands the app its key id in standard
 base64; converting it is the client's job. A malformed `$publicKeyPem`, a `$previousCounter` outside
-0..2^32−1, or an invalid `TeamId` or `BundleId` is an `InvalidArgumentException` (a caller error), never
-an `AppAttestException`. The library keeps no state: storage, challenges and the counter race are the
-caller's.
+0..2^32−1, an `$allowed` that is empty or not of `Environment` cases, or an invalid `TeamId` or `BundleId`
+is an `InvalidArgumentException` (a caller error), never an `AppAttestException`. The library keeps no
+state: storage, challenges and the counter race are the caller's.
 
 ## Post-completion
 

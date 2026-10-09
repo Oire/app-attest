@@ -9,12 +9,15 @@ The first release: verification of Apple App Attest attestations and assertions,
   two-certificate chain to the trust anchor valid at the clock's time with a CA intermediate, the nonce
   in the credential certificate, the key id, the `rpIdHash`, a zero counter, the environment and the
   `credentialId`. Each certificate must be exactly one DER `SEQUENCE` of at most 4096 bytes before
-  phpseclib reads it, and each issuer is checked as the certificate already parsed. It returns an `AttestedKey` with the key id, the public key as PEM, the environment, the
-  receipt and counter 0. `clientDataHash` may be any length, as in Apple's own sample.
-* Both verifiers refuse with `Format` a document that is not exactly one CBOR map with nothing after it,
-  a map in it with a key that is not a text string or a key twice, and any member of the wrong type:
-  `fmt` must be a text string, `x5c` an array, the certificates, `receipt`, `authData`, `signature` and
-  `authenticatorData` byte strings.
+  phpseclib reads it, and each issuer is checked as the certificate already parsed. It returns an
+  `AttestedKey` with the key id, the public key as PEM, the environment, the receipt and counter 0.
+  `clientDataHash` may be any length, as in Apple's own sample.
+* Both verifiers refuse with `Format`, before decoding it, an attestation longer than 16384 bytes or an
+  assertion longer than 4096 bytes, so hostile input cannot exhaust memory. They also refuse with
+  `Format` a document that is not exactly one CBOR map with nothing after it, a map in it with a key that
+  is not a text string or a key twice, and any member of the wrong type: `fmt` must be a text string,
+  `x5c` an array, the certificates, `receipt`, `authData`, `signature` and `authenticatorData` byte
+  strings.
 * **`AssertionVerifier`** checks an assertion's ECDSA P-256 signature over the nonce, the SHA-256 of
   `authenticatorData` followed by the SHA-256 of `clientData`, its `rpIdHash` and a counter strictly
   greater than the previous one, and returns the new counter. `clientData` is never parsed.
@@ -23,14 +26,16 @@ The first release: verification of Apple App Attest attestations and assertions,
   bytes of an assertion, for the validation category (`apple_validation_category_01` or
   `validationCategory`, four little-endian bytes or an unsigned integer) and the bundle version
   (`apple_bundle_version_01` or `bundleVersion`, a text string). `AttestedKey` reports them as
-  `$validationCategory`, `$bundleVersion` and `validationCategory()`. A `LaunchPolicy`, passed as the new
-  last argument of either `verify()`, enforces them with the reasons `ValidationCategory` and
-  `BundleVersion`; without one, nothing changes, and a missing or malformed extensions area is ignored.
-  `ValidationCategory` is an int-backed enum with Apple's launch-constraint numbering.
+  `$validationCategory`, `$bundleVersion` and `validationCategory()`. A `LaunchPolicy`, passed as the
+  optional last argument of either `verify()`, enforces them with the reasons `ValidationCategory` and
+  `BundleVersion`; without one they are only reported, and a missing or malformed extensions area is
+  ignored. `LaunchPolicy::allowing()` needs at least one category. `ValidationCategory` is an int-backed
+  enum with Apple's launch-constraint numbering.
 * **Typed failures:** `AttestationException` and `AssertionException`, both extending the abstract
   `AppAttestException`, carry a `$reason` enum case naming the failed check. Caller errors, such as an
-  invalid team id or public key, are `InvalidArgumentException`. A broken installation or another
-  phpseclib map registered for the nonce extension is a `LogicException`.
+  invalid team id or public key, or an `$allowed` list that is empty or not of `Environment` cases, are
+  `InvalidArgumentException`. A broken installation or another phpseclib map registered for the nonce
+  extension is a `LogicException`.
 * **`TrustAnchor`** bundles Apple's App Attest root and checks its pinned SHA-256 fingerprint on every
   load; `TrustAnchor::fromPem()` takes a test root.
 * **Value objects:** `TeamId`, `BundleId`, `AppIdentity`, the `Environment` and `ValidationCategory`

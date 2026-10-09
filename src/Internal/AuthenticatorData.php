@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
+use LogicException;
+
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
  * Copyright © 2026 André Polykanine, Oire Software, https://oire.org/
@@ -31,6 +33,7 @@ namespace Oire\AppAttest\Internal;
  */
 final readonly class AuthenticatorData
 {
+    public const int MAX_UINT32 = 0xFFFFFFFF;
     private const int RP_ID_HASH_LENGTH = 32;
     private const int COUNTER_OFFSET = 33;
     private const int COUNTER_LENGTH = 4;
@@ -125,12 +128,18 @@ final readonly class AuthenticatorData
     /**
      * @param 'n'|'N' $format
      *
+     * @throws LogicException if the bytes are too short, which every caller has checked
+     *
      * @psalm-pure
      */
     private static function unsigned(string $format, string $bytes): int
     {
         $unpacked = unpack($format, $bytes);
 
-        return $unpacked === false || !isset($unpacked[1]) || !is_int($unpacked[1]) ? 0 : $unpacked[1];
+        if ($unpacked === false || !isset($unpacked[1]) || !is_int($unpacked[1])) {
+            throw new LogicException('A length-checked authenticator data field could not be read.');
+        }
+
+        return $unpacked[1];
     }
 }
