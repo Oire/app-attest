@@ -30,8 +30,8 @@ use RuntimeException;
  */
 
 /**
- * Makes assertions the way a device does: signs authenticatorData ‖ SHA-256(clientData) with a P-256 key and
- * CBOR-encodes {signature, authenticatorData}. Test code only, never shipped.
+ * Makes assertions the way a device does: signs the nonce SHA-256(authenticatorData ‖ SHA-256(clientData)) with
+ * ECDSA P-256 over SHA-256 and CBOR-encodes {signature, authenticatorData}. Test code only, never shipped.
  */
 final class AssertionBuilder
 {
@@ -90,7 +90,9 @@ final class AssertionBuilder
     {
         $authenticatorData = $this->app->rpIdHash() . chr(self::FLAGS) . pack('N', $this->counter);
 
-        if (!openssl_sign($authenticatorData . hash('sha256', $clientData, true), $signature, $this->key->privateKeyPem, OPENSSL_ALGO_SHA256)) {
+        $nonce = hash('sha256', $authenticatorData . hash('sha256', $clientData, true), true);
+
+        if (!openssl_sign($nonce, $signature, $this->key->privateKeyPem, OPENSSL_ALGO_SHA256)) {
             throw new RuntimeException('Cannot sign the test assertion.');
         }
 

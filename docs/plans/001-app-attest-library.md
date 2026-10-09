@@ -22,14 +22,14 @@ to the caller, who passes the stored public key and counter in and stores the ne
       each documented failure with its own `$reason`: `CertificateChain`, `Nonce`, `KeyId`, `RpIdHash`,
       `Counter`, `Environment`, `Format` — each failure reached through the verifier's inputs or through
       the test-only `AttestationBuilder` (Task 3), never by editing a signed vector
-- [ ] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
+- [x] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
       a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
       each with its own `$reason`
 - [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
 - [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
       time
-- [ ] all binary handling is 8-bit-safe under Oire's code style (Development approach)
+- [x] all binary handling is 8-bit-safe under Oire's code style (Development approach)
 - [ ] Psalm level 1, PHP CS Fixer with Oire's rules and PHPUnit pass in CI on PHP 8.3, 8.4 and 8.5
 - [ ] Dependabot watches Composer and GitHub Actions; pushing a `v*` tag creates the GitHub Release
 - [ ] README documents installation, both verifiers, the reasons, and what the caller must do itself
@@ -306,6 +306,9 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 - [x] `AssertionBuilder` (test code) generates a P-256 key and signs `authenticatorData ‖
       SHA-256(clientData)` for any `rpIdHash`, counter and `clientData`, CBOR-encoding
       `{signature, authenticatorData}` — the same recipe consumers use for their own tests
+      ⚠️ Corrected in Task 5: the genuine vectors are signed over the nonce
+      SHA-256(`authenticatorData ‖ SHA-256(clientData)`), with ECDSA over SHA-256 on top, so the builder
+      now signs the nonce (plan execution, 2026-10-09)
 - [x] `tests/fixtures/README.md` lists each vector's origin (repository, commit, path) and license
 - [x] tests: every sidecar parses, its base64url fields decode, and it names an existing file; a builder
       attestation verifies with the builder's root (a smoke check of the builders themselves)
@@ -368,9 +371,12 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
 #### Files
 - Create: `src/AssertionVerifier.php`
 - Create: `tests/AssertionVerifierTest.php`
+- ➕ Create: `tests/Support/AssertionParts.php` (a decoded assertion's two members, for tests that
+  reassemble one); Modify: `tests/Support/AssertionBuilder.php`, `tests/Support/BuildersTest.php` (the
+  builder signs the nonce) (plan execution, 2026-10-09)
 
 #### Steps
-- [ ] `verify(assertionCbor, clientData, publicKeyPem, previousCounter, app)`: reject an unparsable PEM or
+- [x] `verify(assertionCbor, clientData, publicKeyPem, previousCounter, app)`: reject an unparsable PEM or
       a `previousCounter` outside 0..2^32−1 with `InvalidArgumentException`; then, each failure an
       `AssertionException` with the reason named: decode CBOR `{signature, authenticatorData}` (a decoder
       exception, a missing member or an `authenticatorData` shorter than 37 bytes is `Format`); verify
@@ -380,12 +386,22 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       `=== 1`, else `Signature`; `rpIdHash` = `app->rpIdHash()` — else `RpIdHash`; the counter (read
       with `unpack('N', …)`) strictly greater than `previousCounter` — else `Counter`; return the new
       counter
-- [ ] `clientData` is the caller's raw bytes; the library never parses it (what it contains is the
+      ⚠️ The "concatenation, not its hash" instruction is wrong: every genuine vector fails it and
+      verifies only as `openssl_verify(nonce, signature, key, OPENSSL_ALGO_SHA256)` with nonce =
+      SHA-256(`authenticatorData ‖ SHA-256(clientData)`), as Apple's step 3 says ("valid for nonce"): the
+      device signs the nonce, so it is hashed twice. A signature over the bare concatenation is refused
+      with `Signature`, and a test pins that. The PEM is accepted only as one `PUBLIC KEY` block holding an
+      uncompressed P-256 SubjectPublicKeyInfo (what `AttestedKey::$publicKeyPem` returns), decoded by the
+      library itself and checked with `Internal\EcPoint`, so a path such as `file://…`, a certificate, a
+      private key, an RSA or P-384 key, or a point off the curve is an `InvalidArgumentException` and
+      OpenSSL never reads a file. `authenticatorData` longer than 37 bytes is not refused; only its first
+      37 are read (plan execution, 2026-10-09)
+- [x] `clientData` is the caller's raw bytes; the library never parses it (what it contains is the
       caller's protocol — Apple's assertion step 6, checking the challenge inside it, is the caller's)
-- [ ] tests: every genuine vector accepted with its counter; builder assertions accepted; a flipped
+- [x] tests: every genuine vector accepted with its counter; builder assertions accepted; a flipped
       signature byte; a foreign key; another bundle; an equal and a lower previous counter; a garbage
       document; an invalid PEM and a negative counter are `InvalidArgumentException`
-- [ ] validation commands pass
+- [x] validation commands pass
 
 ### Task 6: Documentation, repository metadata and the first release
 

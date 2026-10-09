@@ -196,8 +196,8 @@ final class BuildersTest extends TestCase
         self::assertSame(37, mb_strlen($authenticatorData, '8bit'));
         self::assertSame((new AppIdentity(new TeamId('ABCDE12345'), new BundleId('com.example.app')))->rpIdHash(), mb_substr($authenticatorData, 0, 32, '8bit'));
         self::assertSame(1, self::counterOf($authenticatorData));
-        self::assertSame(1, openssl_verify($authenticatorData . hash('sha256', 'client data', true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
-        self::assertSame(0, openssl_verify($authenticatorData . hash('sha256', 'other data', true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
+        self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
+        self::assertSame(0, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'other data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
     }
 
     public function testAssertionFieldsCanBeChosen(): void
@@ -215,7 +215,7 @@ final class BuildersTest extends TestCase
 
         self::assertSame($app->rpIdHash(), mb_substr($authenticatorData, 0, 32, '8bit'));
         self::assertSame(5, self::counterOf($authenticatorData));
-        self::assertSame(1, openssl_verify($authenticatorData . hash('sha256', 'client data', true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
+        self::assertSame(1, openssl_verify(hash('sha256', $authenticatorData . hash('sha256', 'client data', true), true), $signature, $builder->publicKeyPem(), OPENSSL_ALGO_SHA256));
     }
 
     /**
