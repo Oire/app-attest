@@ -23,13 +23,13 @@
         "ext-mbstring": "*",
         "ext-openssl": "*",
         "ext-sodium": "*",
-        "phpseclib/phpseclib": "^4.0",
         "psr/clock": "^1.0",
         "spomky-labs/cbor-php": "^3.4"
     },
     "require-dev": {
         "friendsofphp/php-cs-fixer": "*",
         "oire/php-code-style": "dev-master",
+        "phpseclib/phpseclib": "^4.0",
         "phpunit/phpunit": "*",
         "psalm/plugin-phpunit": "*",
         "symfony/clock": "^7.4 || ^8.0",

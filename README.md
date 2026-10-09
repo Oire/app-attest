@@ -31,10 +31,10 @@ suggested, because decoding a large number from untrusted CBOR without it takes 
 number's length, and every attestation is untrusted input.
 
 The library depends on [spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR and on
-[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface, and its Composer package
-requires [phpseclib](https://phpseclib.com/) 4. It reads certificates with its own DER reader and checks
-signatures and keys with OpenSSL, so verification calls no phpseclib code (see
-[Using phpseclib Elsewhere in Your Application](#using-phpseclib-elsewhere-in-your-application)).
+[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface. It reads certificates with its own
+DER reader and checks signatures and keys with OpenSSL, so it does not depend on
+[phpseclib](https://phpseclib.com/) and works next to any version of it, or none (see
+[Using phpseclib in Your Application](#using-phpseclib-in-your-application)).
 
 ## Installation
 
@@ -440,32 +440,20 @@ output is: lengths in their shortest form, booleans `0x00` or `0xFF`, validity t
 the key usage without trailing zero bits, and each of the key usage, key identifier, `basicConstraints`
 and nonce extensions at most once.
 
-## Using phpseclib Elsewhere in Your Application
+## Using phpseclib in Your Application
 
-The library's Composer package requires phpseclib 4. phpseclib 3 and 4 are the same Composer package, so
-your application can use only phpseclib 4 alongside it.
+The library neither requires nor calls phpseclib, so your application may use phpseclib 3, phpseclib 4 or
+neither alongside it. phpseclib keeps its settings in static properties shared by the whole process, such as
+`ASN1::enableBlobsOnBadDecodes()`, the CA store of `X509::addCA()`, `X509::ignoreKeyUsage()` or
+`X509::looseDNComparison()`. None of them changes a verification result, and the library changes none of
+them: unlike 1.x, it neither disables phpseclib's URL fetching nor registers the App Attest nonce extension
+with phpseclib.
 
-phpseclib keeps its settings in static properties, shared by every phpseclib object in the process, so a
-setting made by one component applies to all of them. Neither `AttestationVerifier` nor
-`TrustAnchor::fromPem()` calls phpseclib: the library takes certificates apart with its own strict DER reader
-and checks each signature and key with OpenSSL. None of phpseclib's process-wide settings changes a
-verification result, and the library changes none of them:
-
-* **ASN.1:** `ASN1::enableBlobsOnBadDecodes()`, under which phpseclib maps a malformed element partly
-  instead of failing, `ASN1::setRecursionDepth()`, `ASN1::loadOIDs()`, `ASN1::disableCacheInvalidation()`,
-  `ASN1::ignoreEncodedCache()` and `ASN1::enable64BitOIDHandling()`.
-* **X.509:** the CA store of `X509::addCA()`, `X509::setTargetValidationDate()`,
-  `X509::setCRLLookupCallback()`, `X509::setURLFetchCallback()`, `X509::setRecurLimit()`, the extension
-  maps of `X509::registerExtension()`, `X509::ignoreKeyUsage()`, `X509::ignoreBasicConstraints()`,
-  `X509::looseDNComparison()` and `X509::enableBinaryOutput()`.
-* **Keys and numbers:** `PKCS::requirePEM()` and `PKCS::requireDER()`, `AsymmetricKey::addFileFormat()`,
-  `forceEngine()` on the key classes, `AsymmetricKey::setOpenSSLConfigPath()`, the EC curve settings
-  and `BigInteger::setEngine()`.
-
-The library itself requires `keyCertSign` of each issuer, the CA flag of the intermediate, matching key
-identifiers and an issuer name equal byte for byte to the issuer's subject name, matches extensions and the
-signature algorithm by their encoded OIDs, and decodes the App Attest nonce extension itself. Verification
-makes no network call: issuer certificates named in `authorityInfoAccess` are never fetched.
+Since no phpseclib switch applies, the library makes its own checks: it requires `keyCertSign` of each
+issuer, the CA flag of the intermediate, matching key identifiers and an issuer name equal byte for byte to
+the issuer's subject name, matches extensions and the signature algorithm by their encoded OIDs, and decodes
+the nonce extension itself. Verification makes no network call: issuer certificates named in
+`authorityInfoAccess` are never fetched.
 
 ## Testing Your Own Code
 
@@ -510,8 +498,9 @@ the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this libra
 Attestations are harder to make, because they need a certificate chain with the nonce extension. This
 repository's test-only
 [AttestationBuilder](https://github.com/Oire/app-attest/blob/master/tests/Support/AttestationBuilder.php)
-shows how to sign one with phpseclib and verify it against `TrustAnchor::fromPem()` of its own root. The
-test code is not part of the Composer package.
+shows how to sign one with phpseclib 4 and verify it against `TrustAnchor::fromPem()` of its own root. The
+test code is not part of the Composer package, and phpseclib is only a development dependency of this
+repository: require it yourself to build chains the same way.
 
 ## API Reference
 

@@ -47,22 +47,25 @@ src/
 resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
-  *Test.php                 # Verifier, value, exception and trust anchor tests; Internal/ is tested through the verifiers
+  *Test.php                 # Verifier, value, exception and trust anchor tests; Internal/ is tested through the verifiers;
+                            # RuntimeDependencyTest fails if code in src/ names phpseclib
   Internal/                 # ErrorGuardTest: the one internal class whose contract is tested directly
   Fixtures.php              # Loads golden vectors and their sidecars, with a MockClock at the vector's time
-  Support/                  # Test-only AttestationBuilder, AssertionBuilder and helpers; never shipped
+  Support/                  # Test-only AttestationBuilder, AssertionBuilder and helpers, built on phpseclib; never shipped
   fixtures/                 # Genuine vectors, byte-for-byte source copies, licenses, README with origins
 ```
 
 ## Conventions
 
 - PHP 8.3+, extensions gmp, mbstring, openssl, sodium. `declare(strict_types=1);` everywhere.
-- phpseclib 4 only (namespace `phpseclib4\`); phpseclib 3 is not supported. `src/` calls no phpseclib code:
-  the test builders do.
+- **phpseclib is test-only.** It sits in `require-dev` (phpseclib 4, namespace `phpseclib4\`) for the test
+  builders, so consumers install the library without it. `src/` must never import or call it again: under
+  `composer install --no-dev` such code would fail, and `RuntimeDependencyTest` refuses any phpseclib name in
+  `src/` outside comments. Never move it back to `require`.
 - **No process-wide state decides a result.** Certificates are read with `Internal\Der`, `DerElement` and
-  `Certificate`, the library's own strict DER reader, never with phpseclib's `ASN1`/`X509`, whose settings
-  are static and shared by the whole process. Do not bring phpseclib back into `src/`, and do not fix such a
-  dependency by saving a setting and restoring it in `finally`.
+  `Certificate`, the library's own strict DER reader, never with a library whose settings are static and
+  shared by the whole process, as phpseclib's `ASN1`/`X509` are. Do not fix such a dependency by saving a
+  setting and restoring it in `finally`.
 - Final classes (abstract exception base excepted), readonly value objects. Public API classes carry
   `@psalm-api`, implementation details live in `Internal/` and are `@internal`.
 - **Verification only.** No state, no I/O: no network, no filesystem except reading the bundled root, no
@@ -134,12 +137,13 @@ tests/
   follows it instead of throwing: a `basicConstraints` with `cA` true and an extra element passed for a CA,
   an unmappable extension was skipped, an unknown field before the extensions dropped them. Even without it
   the mapper accepted a field after the extensions, UTCTime without seconds and BER lengths. After three
-  such findings the library stopped calling phpseclib in `src/`. `Internal\Certificate::tryParse()` reads
-  each certificate with `Internal\Der` and refuses anything that is not DER where it reads: indefinite or
-  longer than needed lengths, high tag numbers, bytes after an element, booleans other than `0x00`/`0xFF`,
-  integers and OIDs not in their shortest form, bit strings with set unused bits, times other than RFC 5280's
-  (UTC, seconds, no fraction; UTCTime years 50 to 99 are 19xx), fields out of order or after the extensions,
-  an empty extension list, an Extension of other than two or three fields.
+  such findings the library stopped calling phpseclib in `src/`, and 2.0 dropped it from `require`.
+  `Internal\Certificate::tryParse()` reads each certificate with `Internal\Der` and refuses anything that is
+  not DER where it reads: indefinite or longer than needed lengths, high tag numbers, bytes after an element,
+  booleans other than `0x00`/`0xFF`, integers and OIDs not in their shortest form, bit strings with set
+  unused bits, times other than RFC 5280's (UTC, seconds, no fraction; UTCTime years 50 to 99 are 19xx),
+  fields out of order or after the extensions, an empty extension list, an Extension of other than two or
+  three fields.
 - The chain is checked signature first: each issuer's ECDSA signature with `openssl_verify()` over the
   original `tbsCertificate` bytes, the signature BIT STRING declaring no unused bits, the outer
   `signatureAlgorithm` equal byte for byte to the signed one and ecdsa-with-SHA256/384/512 without
@@ -163,9 +167,10 @@ tests/
   `use64BitOIDHandling`; `X509` CA store, target date, CRL and URL callbacks, `recur_limit`, extension maps,
   `checkKeyUsage`, `strictDNComparison`, `checkBasicConstraints`, `binary`; `CSR`/`CRL`/`SPKAC`/`PFX`
   output settings; `PKCS::$format`, `AsymmetricKey` plugins, config path and `forceEngine()` per key class,
-  EC curve settings, RSA blinding and salt settings, `BigInteger::setEngine()`. None is on a code path
-  of `src/` any more, so none changes a result. `testNoProcessWideSettingChangesAnOutcome` flips 17 of them;
-  the CRL and URL callbacks have tests of their own. cbor-php keeps no static state.
+  EC curve settings, RSA blinding and salt settings, `BigInteger::setEngine()`. phpseclib is not even a
+  runtime dependency any more, so none changes a result; the tests still run with it installed.
+  `testNoProcessWideSettingChangesAnOutcome` flips 17 of them; the CRL and URL callbacks have tests of their
+  own. cbor-php keeps no static state.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.

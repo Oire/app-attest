@@ -31,11 +31,10 @@ use Throwable;
  * a CA issued by the trust anchor, each certificate valid at the given time. Holds what the verifier reads
  * from the credential certificate.
  *
- * Each certificate is taken apart by the library's own strict DER reader, never by phpseclib, whose settings
- * are process-wide: its X509 class trusts a process-wide CA store, target date and CRL callback and obeys
- * switches that loosen issuer matching, and its ASN.1 mapper turns malformed elements into partial results
- * once another component enables ASN1::enableBlobsOnBadDecodes(). So no setting of any library changes what a
- * certificate decodes to. Each link is checked signature first: the issuer's ECDSA signature over the
+ * Each certificate is taken apart by the library's own strict DER reader, not by a general X.509 library
+ * whose process-wide settings (a CA store, a target date, callbacks, looser issuer matching, lenient decoding)
+ * another component could change, so no setting of any library changes what a certificate decodes to or
+ * whether a chain passes. Each link is checked signature first: the issuer's ECDSA signature over the
  * original tbsCertificate bytes, then the issuer Name, key usage and key identifiers, the validity period and
  * the intermediate's basicConstraints. Verification makes no network call.
  *
@@ -189,9 +188,9 @@ final readonly class CertificateChain
      * Whether the issuer issued the certificate, its signature aside. The certificate's issuer Name must be
      * byte for byte the issuer's subject Name, as RFC 5280 requires a CA to encode it, rather than equal after
      * a normalization: no setting can loosen the match, and the bytes are those the signatures cover. The
-     * issuer's key usage must include keyCertSign. As in phpseclib's isIssuerOf(), an authority key identifier
-     * must name the issuer's subject key identifier when the issuer has one, and the issuer's serial number
-     * when it holds one. Each of these extensions may appear only once, as RFC 5280 requires.
+     * issuer's key usage must include keyCertSign. An authority key identifier must name the issuer's subject
+     * key identifier when the issuer has one, and the issuer's serial number when it holds one. Each of these
+     * extensions may appear only once, as RFC 5280 requires.
      *
      * @psalm-capabilities read-props
      */

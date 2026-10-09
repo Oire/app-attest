@@ -1,15 +1,14 @@
 # Version 2.0.0 (Unreleased)
 
-The library moves to phpseclib 4 and no longer reads certificates with phpseclib at all: it takes them apart
-with its own strict DER reader and checks signatures and keys with OpenSSL, so no process-wide phpseclib
-setting changes a verification result. The verifiers' signatures and results are unchanged, and Apple's
-genuine chains verify as before.
+The library no longer depends on phpseclib: it takes certificates apart with its own strict DER reader and
+checks signatures and keys with OpenSSL, so no process-wide phpseclib setting changes a verification result.
+The verifiers' signatures and results are unchanged, and Apple's genuine chains verify as before.
 
 ## Breaking Changes
 
-* **phpseclib 4 is required:** `phpseclib/phpseclib` `^4.0` replaces `^3.0.57`. phpseclib 3 and 4 are the
-  same Composer package, so this version forces phpseclib 4 on the whole application; an application that
-  needs phpseclib 3 stays on 1.x.
+* **phpseclib is no longer a runtime dependency:** `phpseclib/phpseclib` leaves `require`. The library calls
+  no phpseclib code and works next to any phpseclib version, or none, so an application that uses phpseclib
+  and relied on this library to install it must require it directly.
 * **`TrustAnchor::fromPem()` is stricter:** it throws an `InvalidArgumentException` for a root without an
   EC key (Ed25519 and Ed448 included) or without a key usage extension that includes `keyCertSign`, test
   roots that 1.0 accepted although no chain could lead to them, and for a root that is not DER where the
@@ -24,12 +23,16 @@ genuine chains verify as before.
   identifier, `basicConstraints` and nonce extensions at most once. A chain that 1.0 accepted otherwise fails
   with `CertificateChain`, or `Nonce` for a malformed nonce extension.
 * **The library no longer changes phpseclib for the rest of the application.** 1.0 disabled URL fetching
-  and registered the nonce extension's map process-wide. Applications that called `X509::enableURLFetch()`
-  after each verification, as the 1.0 README advised, must drop the call (phpseclib 4 has no such method),
-  and phpseclib no longer decodes the nonce extension of certificates your own code loads.
+  and registered the nonce extension's map process-wide. Applications no longer need to call
+  `X509::enableURLFetch()` after each verification, as the 1.0 README advised, and phpseclib no longer
+  decodes the nonce extension of certificates your own code loads.
 
 ## Changes
 
+* **Any phpseclib version, or none.** Without phpseclib at run time, the library works next to phpseclib 3,
+  phpseclib 4 or neither, where 1.x forced phpseclib 3 on the whole application. phpseclib is now a
+  development dependency, used only by the repository's test builders. `TrustAnchor::fromPem()` stays
+  stricter, as listed above.
 * **No phpseclib setting changes a result.** phpseclib keeps its settings process-wide: 4's
   `X509::validateSignature()` trusts a process-wide CA store, checks a process-wide validation date, calls
   the CRL callback and resolves `caIssuers` host names before it asks the URL-fetch callback,

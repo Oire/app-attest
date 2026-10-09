@@ -25,9 +25,8 @@ namespace Oire\AppAttest\Internal;
  * Apple's nonce extension on the credential certificate, OID 1.2.840.113635.100.8.2:
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
- * The library decodes the extension's value itself with its own DER reader, so it registers no map with
- * phpseclib, which keeps extension maps process-wide, and nothing the process sets in phpseclib changes the
- * nonce it reads.
+ * The library decodes the extension's value itself with its own DER reader, so no extension map another
+ * component registers process-wide changes the nonce it reads.
  *
  * @internal
  *
