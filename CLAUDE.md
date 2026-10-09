@@ -42,7 +42,8 @@ src/
   Value/                    # TeamId, BundleId, AppIdentity, Environment, AttestedKey, VerifiedAssertion, ValidationCategory, LaunchPolicy
   Exception/                # AppAttestException (abstract), Attestation/AssertionException + reason enums
   Internal/                 # @internal: Cbor, CborStream, CborText, CborMap, AuthenticatorData, Extensions,
-                            # CertificateChain, Der, EcPoint, NonceExtension, Pem, ErrorGuard
+                            # CertificateChain, Certificate, Der, DerElement, EcPoint, NonceExtension, Pem,
+                            # ErrorGuard
 resources/
   Apple_App_Attestation_Root_CA.pem   # Read at run time, so never export-ignored
 tests/
@@ -56,7 +57,12 @@ tests/
 ## Conventions
 
 - PHP 8.3+, extensions gmp, mbstring, openssl, sodium. `declare(strict_types=1);` everywhere.
-- phpseclib 4 only (namespace `phpseclib4\`); phpseclib 3 is not supported.
+- phpseclib 4 only (namespace `phpseclib4\`); phpseclib 3 is not supported. `src/` calls no phpseclib code:
+  the test builders do.
+- **No process-wide state decides a result.** Certificates are read with `Internal\Der`, `DerElement` and
+  `Certificate`, the library's own strict DER reader, never with phpseclib's `ASN1`/`X509`, whose settings
+  are static and shared by the whole process. Do not bring phpseclib back into `src/`, and do not fix such a
+  dependency by saving a setting and restoring it in `finally`.
 - Final classes (abstract exception base excepted), readonly value objects. Public API classes carry
   `@psalm-api`, implementation details live in `Internal/` and are `@internal`.
 - **Verification only.** No state, no I/O: no network, no filesystem except reading the bundled root, no
@@ -92,6 +98,13 @@ tests/
   `tests/Support/`.
 - PHPUnit fails on warnings, notices, deprecations and risky tests: malformed input must raise a typed
   failure, never a PHP warning.
+- Malformed certificates are made with `AttestationBuilder::withIntermediateTbsCertificate()` and
+  `withCredentialTbsCertificate()`, which edit the `tbsCertificate` (helpers in `SignedCertificate`:
+  `withFields()`, `withExtensions()`, `withExtensionValue()`) and sign it again, so only the structure under
+  test can fail.
+- `testNoProcessWideSettingChangesAnOutcome` flips each process-wide phpseclib setting and checks that every
+  case (built and genuine chains, malformed and forged ones, `TrustAnchor::fromPem()`) ends as without it.
+  A new case or a new phpseclib setting goes there.
 - Builders sign with phpseclib 4 (`PrivateKey::sign(X509)`) and write DER with `toString(['binary' => true])`:
   the default output, PEM, is a process-wide setting. Issuers need a key usage with `keyCertSign`, an
   `authorityKeyIdentifier`, when present, must equal the issuer's `subjectKeyIdentifier`, and a certificate's
@@ -115,41 +128,44 @@ tests/
   `authData` may carry bytes after the credential public key.
 - phpseclib 4's `X509::validateSignature()` trusts the process-wide CA store of `X509::addCA()`, checks a
   process-wide target date, calls the CRL callback, resolves `caIssuers` host names (DNS) before it asks the
-  URL-fetch callback, and does not check an issuer's `basicConstraints` `cA` flag. `CertificateChain`
-  never calls it. It first maps each certificate without X509's rules,
-  `ASN1::map(ASN1::decodeBER($der), Certificate::MAP)`, and checks each issuer's ECDSA signature with
-  `openssl_verify()` over the original `tbsCertificate` bytes:
-  the certificate must be exactly the DER of its three parts, the signature BIT STRING must declare no
-  unused bits, the outer `signatureAlgorithm` must equal the signed one byte for byte and be
-  ecdsa-with-SHA256/384/512 without parameters, and the issuer's key must be EC (OpenSSL reports Edwards
-  keys as another type). Only then does it check the validity periods (`validateDate()` is private in 4),
-  each issuer and the intermediate's `cA` flag. `disableURLFetch()` and `loadCA()` no longer exist; do not
-  bring the CA store back.
-- phpseclib 4 decodes lazily: a malformed field throws only when it is read, reading a missing key of a
-  `Constructed` creates it and drops the cached encoding, and `X509::load()` runs the SubjectPublicKeyInfo
-  through `PublicKeyLoader` (every key format, then X.509 auto-detection) and replaces it with a key
-  object. Hence no signature is checked through `X509::getSignableSection()`, which re-encodes the
-  certificate once its cache is gone, and no certificate of the chain reaches `X509::load()`; only
-  `TrustAnchor::fromPem()` loads its root with it. The nonce, the SubjectPublicKeyInfo, the names and the
-  key usage, key identifier and `basicConstraints` extensions are read from the rule-less map and matched
-  by dotted OID, never by phpseclib's names, which `ASN1::loadOIDs()` can change. phpseclib still
-  warns on some malformed DER, such as an empty OID (hence `ErrorGuard`), and throws
-  `phpseclib4\Exception\*` exceptions.
-- phpseclib keeps extension maps process-wide, `registerExtension()` refuses an OID registered before, even
-  with the same map, and a registered map that fails on a value throws out of `getExtension()`. So the
-  library registers no map for the nonce extension: `Internal\NonceExtension` decodes it from the rule-less
-  map, where a map the process registered for its OID, or for a name `ASN1::loadOIDs()` gave it, changes
-  nothing. Do not bring back a guard that reads the registered maps. A credential certificate with the
-  nonce extension twice fails the nonce.
-- `X509::isIssuerOf()` reads the process-wide `X509::ignoreKeyUsage()`, `X509::looseDNComparison()` and
-  `X509::ignoreBasicConstraints()` switches (its `basicConstraints` check compares an array with a string and
-  never runs), so `CertificateChain` does not call it. It requires the child's issuer Name to equal the
-  issuer's subject Name byte for byte (the encoding RFC 5280 requires a CA to reuse; Apple's chain does, and
-  no normalization can be loosened), the issuer's key usage, exactly one, to include `keyCertSign`, and, as
-  `isIssuerOf()` did, an `authorityKeyIdentifier` to name the issuer's `subjectKeyIdentifier` when the issuer
-  has one and its serial number when it holds one; a key usage or key identifier extension twice fails.
-  `TrustAnchor::fromPem()` refuses a root without `keyCertSign`, or without an EC key: no chain could lead to
-  such a root.
+  URL-fetch callback, and does not check an issuer's `basicConstraints` `cA` flag; `X509::isIssuerOf()` reads
+  `X509::ignoreKeyUsage()`, `X509::looseDNComparison()` and `X509::ignoreBasicConstraints()`. Under
+  `ASN1::enableBlobsOnBadDecodes()` phpseclib's mapper turns a malformed element into a blob or drops what
+  follows it instead of throwing: a `basicConstraints` with `cA` true and an extra element passed for a CA,
+  an unmappable extension was skipped, an unknown field before the extensions dropped them. Even without it
+  the mapper accepted a field after the extensions, UTCTime without seconds and BER lengths. After three
+  such findings the library stopped calling phpseclib in `src/`. `Internal\Certificate::tryParse()` reads
+  each certificate with `Internal\Der` and refuses anything that is not DER where it reads: indefinite or
+  longer than needed lengths, high tag numbers, bytes after an element, booleans other than `0x00`/`0xFF`,
+  integers and OIDs not in their shortest form, bit strings with set unused bits, times other than RFC 5280's
+  (UTC, seconds, no fraction; UTCTime years 50 to 99 are 19xx), fields out of order or after the extensions,
+  an empty extension list, an Extension of other than two or three fields.
+- The chain is checked signature first: each issuer's ECDSA signature with `openssl_verify()` over the
+  original `tbsCertificate` bytes, the signature BIT STRING declaring no unused bits, the outer
+  `signatureAlgorithm` equal byte for byte to the signed one and ecdsa-with-SHA256/384/512 without
+  parameters, and the issuer's key EC (OpenSSL reports Edwards keys as another type). Then the validity
+  periods, each issuer and the intermediate's `cA` flag. Extensions are matched by the OID's encoded bytes.
+  The issuer Name must equal the issuer's subject Name byte for byte (the encoding RFC 5280 requires a CA to
+  reuse; Apple's chain does); the issuer needs exactly one key usage, a DER KeyUsage (trailing zero bits
+  removed, nothing past `decipherOnly`) with `keyCertSign`; an `authorityKeyIdentifier` must name the
+  issuer's `subjectKeyIdentifier` when the issuer has one and its serial number when it holds one, as
+  `isIssuerOf()` did; the intermediate needs exactly one `basicConstraints`, `SEQUENCE { TRUE, [INTEGER
+  >= 0] }`. A key usage, key identifier or `basicConstraints` extension twice fails. `TrustAnchor::fromPem()`
+  refuses a root that `Certificate::tryParse()` refuses, without `keyCertSign`, or without an EC key: no
+  chain could lead to such a root.
+- The nonce extension is decoded by `Internal\NonceExtension` with the same reader, exactly
+  `SEQUENCE { [1] { OCTET STRING } }`; no map is registered with phpseclib, so a map the process registered
+  for its OID changes nothing. Do not bring back a guard that reads the registered maps. A credential
+  certificate with the nonce extension twice fails the nonce.
+- Audit of phpseclib 4's process-wide settings (static properties with public setters): `ASN1`
+  `blobsOnBadDecodes`, `recursionDepth` (a depth of 3 or less made the old `TrustAnchor::fromPem()` refuse a
+  valid root), `oids`/`reverseOIDs` (`loadOIDs()`), `invalidateCache`, `useEncodedCache`,
+  `use64BitOIDHandling`; `X509` CA store, target date, CRL and URL callbacks, `recur_limit`, extension maps,
+  `checkKeyUsage`, `strictDNComparison`, `checkBasicConstraints`, `binary`; `CSR`/`CRL`/`SPKAC`/`PFX`
+  output settings; `PKCS::$format`, `AsymmetricKey` plugins, config path and `forceEngine()` per key class,
+  EC curve settings, RSA blinding and salt settings, `BigInteger::setEngine()`. None is on a code path
+  of `src/` any more, so none changes a result. `testNoProcessWideSettingChangesAnOutcome` flips 17 of them;
+  the CRL and URL callbacks have tests of their own. cbor-php keeps no static state.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.

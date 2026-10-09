@@ -10,6 +10,7 @@ use CBOR\MapObject;
 use CBOR\NegativeIntegerObject;
 use CBOR\TextStringObject;
 use CBOR\UnsignedIntegerObject;
+use Closure;
 use DateTimeImmutable;
 use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Value\AppIdentity;
@@ -117,6 +118,16 @@ final class AttestationBuilder
     private string $credentialSignatureHash = 'sha256';
     private ?PrivateKey $intermediateKey = null;
     private ?string $credentialSignedAlgorithm = null;
+
+    /**
+     * @var ?Closure(string): string
+     */
+    private ?Closure $intermediateTbsCertificate = null;
+
+    /**
+     * @var ?Closure(string): string
+     */
+    private ?Closure $credentialTbsCertificate = null;
 
     private function __construct()
     {
@@ -527,6 +538,34 @@ final class AttestationBuilder
     }
 
     /**
+     * The intermediate with its tbsCertificate edited after every other choice, then signed by the root again,
+     * such as with an extension value no encoder would write.
+     *
+     * @param Closure(string): string $edit the tbsCertificate (DER) from the one built
+     */
+    public function withIntermediateTbsCertificate(Closure $edit): self
+    {
+        $builder = clone $this;
+        $builder->intermediateTbsCertificate = $edit;
+
+        return $builder;
+    }
+
+    /**
+     * The credential certificate with its tbsCertificate edited after every other choice, then signed by the
+     * intermediate again with ECDSA over SHA-256.
+     *
+     * @param Closure(string): string $edit the tbsCertificate (DER) from the one built
+     */
+    public function withCredentialTbsCertificate(Closure $edit): self
+    {
+        $builder = clone $this;
+        $builder->credentialTbsCertificate = $edit;
+
+        return $builder;
+    }
+
+    /**
      * The DER of the nonce extension's value for a nonce.
      *
      * @psalm-pure
@@ -590,6 +629,14 @@ final class AttestationBuilder
             );
         }
 
+        if ($this->intermediateTbsCertificate !== null) {
+            $intermediateDer = SignedCertificate::signed(
+                ($this->intermediateTbsCertificate)(SignedCertificate::split($intermediateDer)[0]),
+                SignedCertificate::ECDSA_WITH_SHA256,
+                self::signer($rootKey),
+            );
+        }
+
         $credentialExtensions = [];
         $correctNonce = ($this->nonceExtensionDer ?? self::nonceExtensionDer($nonce)) . $this->nonceExtensionSuffix;
 
@@ -647,6 +694,14 @@ final class AttestationBuilder
             );
             $credentialDer = SignedCertificate::signed(
                 $this->credentialSignedAlgorithm === null ? $tbsCertificate : SignedCertificate::withSignedAlgorithm($tbsCertificate, $this->credentialSignedAlgorithm),
+                SignedCertificate::ECDSA_WITH_SHA256,
+                $this->intermediateKey ?? self::signer($intermediateKey),
+            );
+        }
+
+        if ($this->credentialTbsCertificate !== null) {
+            $credentialDer = SignedCertificate::signed(
+                ($this->credentialTbsCertificate)(SignedCertificate::split($credentialDer)[0]),
                 SignedCertificate::ECDSA_WITH_SHA256,
                 $this->intermediateKey ?? self::signer($intermediateKey),
             );

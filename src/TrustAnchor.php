@@ -6,13 +6,9 @@ namespace Oire\AppAttest;
 
 use InvalidArgumentException;
 use LogicException;
+use Oire\AppAttest\Internal\Certificate;
 use Oire\AppAttest\Internal\CertificateChain;
-use Oire\AppAttest\Internal\Der;
-use Oire\AppAttest\Internal\ErrorGuard;
 use Oire\AppAttest\Internal\Pem;
-use phpseclib4\File\ASN1;
-use phpseclib4\File\X509;
-use Throwable;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -79,7 +75,7 @@ final readonly class TrustAnchor
     {
         $der = Pem::tryDecode($pem, Pem::CERTIFICATE);
 
-        if ($der === null || !Der::isOneSequence($der) || !self::isParsable($der)) {
+        if ($der === null || Certificate::tryParse($der) === null) {
             throw new InvalidArgumentException('The trust anchor must be exactly one PEM-encoded X.509 certificate.');
         }
 
@@ -108,14 +104,5 @@ final readonly class TrustAnchor
         }
 
         return new self($pem);
-    }
-
-    private static function isParsable(string $der): bool
-    {
-        try {
-            return ErrorGuard::call(static fn(): bool => X509::load($der, ASN1::FORMAT_DER)->toArray() !== []);
-        } catch (Throwable) {
-            return false;
-        }
     }
 }

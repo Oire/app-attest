@@ -4,11 +4,6 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
-use phpseclib4\File\ASN1;
-use phpseclib4\File\ASN1\Constructed;
-use phpseclib4\File\ASN1\Types\OctetString;
-use Throwable;
-
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
  * Copyright © 2026 André Polykanine, Oire Software, https://oire.org/
@@ -30,49 +25,35 @@ use Throwable;
  * Apple's nonce extension on the credential certificate, OID 1.2.840.113635.100.8.2:
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
- * The library decodes the extension's value itself, from the certificate mapped without phpseclib's X509
- * rules, so it registers no map with phpseclib, which keeps extension maps process-wide, and a map the
- * process registered for the OID changes nothing.
+ * The library decodes the extension's value itself with its own DER reader, so it registers no map with
+ * phpseclib, which keeps extension maps process-wide, and nothing the process sets in phpseclib changes the
+ * nonce it reads.
  *
  * @internal
+ *
+ * @psalm-immutable
  */
 final class NonceExtension
 {
     public const string OID = '1.2.840.113635.100.8.2';
-    private const array MAP = [
-        'type' => ASN1::TYPE_SEQUENCE,
-        'children' => [
-            'nonce' => [
-                'constant' => 1,
-                'explicit' => true,
-                'type' => ASN1::TYPE_OCTET_STRING,
-            ],
-        ],
-    ];
+
+    /**
+     * The OID's content octets, as Certificate::extensionValues() takes it.
+     */
+    public const string OBJECT_IDENTIFIER = "\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
+    private const int NONCE_TAG = 0xA1;
 
     /**
      * The octet string inside the extension's value, or null if the value is not exactly the SEQUENCE.
+     *
+     * @psalm-pure
      */
     public static function tryDecode(string $value): ?string
     {
-        if (!Der::isOneSequence($value)) {
-            return null;
-        }
+        $fields = Der::tryOne($value)?->children(Der::SEQUENCE) ?? [];
+        $explicit = count($fields) === 1 ? ($fields[0] ?? null)?->children(self::NONCE_TAG) ?? [] : [];
+        $nonce = count($explicit) === 1 ? $explicit[0] ?? null : null;
 
-        try {
-            $decoded = ASN1::map(ASN1::decodeBER($value), self::MAP);
-
-            return $decoded instanceof Constructed && $decoded->offsetExists('nonce') ? self::octetsOf($decoded['nonce']) : null;
-        } catch (Throwable) {
-            return null;
-        }
-    }
-
-    /**
-     * @psalm-capabilities read-props
-     */
-    private static function octetsOf(mixed $value): ?string
-    {
-        return $value instanceof OctetString ? $value->value : null;
+        return Der::hasTag($nonce, Der::OCTET_STRING) ? $nonce->content : null;
     }
 }

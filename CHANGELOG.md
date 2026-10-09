@@ -1,8 +1,9 @@
 # Version 2.0.0 (Unreleased)
 
-The library moves to phpseclib 4 and checks the certificate chain without any of phpseclib's process-wide
-`X509` settings. The verifiers' signatures and results are unchanged, and Apple's genuine chains verify as
-before.
+The library moves to phpseclib 4 and no longer reads certificates with phpseclib at all: it takes them apart
+with its own strict DER reader and checks signatures and keys with OpenSSL, so no process-wide phpseclib
+setting changes a verification result. The verifiers' signatures and results are unchanged, and Apple's
+genuine chains verify as before.
 
 ## Breaking Changes
 
@@ -11,12 +12,17 @@ before.
   needs phpseclib 3 stays on 1.x.
 * **`TrustAnchor::fromPem()` is stricter:** it throws an `InvalidArgumentException` for a root without an
   EC key (Ed25519 and Ed448 included) or without a key usage extension that includes `keyCertSign`, test
-  roots that 1.0 accepted although no chain could lead to them.
+  roots that 1.0 accepted although no chain could lead to them, and for a root that is not DER where the
+  library reads it.
 * **Test chains must look like Apple's:** each certificate signed with ECDSA over SHA-256, SHA-384 or
-  SHA-512, exactly the DER encoding it was signed as, each issuer with a key usage extension that includes
-  `keyCertSign` whatever `X509::ignoreKeyUsage()` says, and each certificate naming its issuer with exactly
-  the bytes of the issuer's subject name, whatever `X509::looseDNComparison()` says. A chain that 1.0
-  accepted otherwise fails with `CertificateChain`.
+  SHA-512, each issuer with a key usage extension that includes `keyCertSign` whatever
+  `X509::ignoreKeyUsage()` says, and each certificate naming its issuer with exactly the bytes of the
+  issuer's subject name, whatever `X509::looseDNComparison()` says. Each certificate must be DER where the
+  library reads it: lengths in their shortest form, nothing after the extensions, booleans `0x00` or `0xFF`,
+  integers and OIDs in their shortest form, validity times in UTC with seconds and without fractions, the
+  key usage without trailing zero bits or bits past `decipherOnly`, and each of the key usage, key
+  identifier, `basicConstraints` and nonce extensions at most once. A chain that 1.0 accepted otherwise fails
+  with `CertificateChain`, or `Nonce` for a malformed nonce extension.
 * **The library no longer changes phpseclib for the rest of the application.** 1.0 disabled URL fetching
   and registered the nonce extension's map process-wide. Applications that called `X509::enableURLFetch()`
   after each verification, as the 1.0 README advised, must drop the call (phpseclib 4 has no such method),
@@ -24,25 +30,27 @@ before.
 
 ## Changes
 
-* **The chain is checked without phpseclib's process-wide `X509` settings.** phpseclib 4's
+* **No phpseclib setting changes a result.** phpseclib keeps its settings process-wide: 4's
   `X509::validateSignature()` trusts a process-wide CA store, checks a process-wide validation date, calls
-  the CRL callback and resolves `caIssuers` host names before it asks the URL-fetch callback, and its
-  `X509::isIssuerOf()` obeys the process-wide `X509::ignoreKeyUsage()` and `X509::looseDNComparison()`
-  switches, so `AttestationVerifier` calls neither. It checks each link itself, the signature first: the
-  issuer's ECDSA signature over the certificate's original `tbsCertificate` bytes, verified with OpenSSL
-  before phpseclib parses the certificate, then the issuer name byte for byte, the issuer's `keyCertSign`,
-  the authority and subject key identifiers as phpseclib matched them, the validity periods and, as before,
-  the intermediate's `basicConstraints` `cA` flag. Extensions and the signature algorithm are matched by
-  OID, whatever names `ASN1::loadOIDs()` gave them.
+  the CRL callback and resolves `caIssuers` host names before it asks the URL-fetch callback,
+  `X509::isIssuerOf()` obeys `X509::ignoreKeyUsage()` and `X509::looseDNComparison()`, and under
+  `ASN1::enableBlobsOnBadDecodes()` its ASN.1 mapper turns a malformed element into a partial result, so
+  that, for example, a `basicConstraints` with `cA` true and an unexpected element passed for a CA. The
+  library therefore calls none of them. It checks each link itself, the signature first: the issuer's ECDSA
+  signature over the certificate's original `tbsCertificate` bytes, then the issuer name byte for byte, the
+  issuer's `keyCertSign`, the authority and subject key identifiers as phpseclib matched them, the validity
+  periods and, as before, the intermediate's `basicConstraints` `cA` flag. Extensions and the signature
+  algorithm are matched by their encoded OIDs.
 * The nonce extension is decoded by the library itself, without `X509::registerExtension()`, so a
   phpseclib map registered for its OID no longer matters: 1.0 threw a `LogicException` for any map other
   than its own.
-* Verification leaves ASN.1 cache invalidation as the application set it; only `TrustAnchor::fromPem()`
-  still parses a certificate with phpseclib's `X509`, which turns it back on.
-* A credential certificate with the nonce extension twice fails the nonce, and a certificate with its key
-  usage, authority key identifier or subject key identifier twice fails the chain. A signature that is not
-  strict DER, unused bits declared in the signature, a `signatureAlgorithm` with parameters or other than
-  the one inside `tbsCertificate`, or a length in a longer form than needed fails the chain.
+* Neither verification nor `TrustAnchor::fromPem()` touches ASN.1 cache invalidation any more.
+* A credential certificate with the nonce extension twice fails the nonce; an issuer with its key usage or
+  subject key identifier twice, a certificate with its authority key identifier twice and an intermediate
+  with its `basicConstraints` twice fail the chain. A
+  signature that is not strict DER, unused bits declared in the signature, a `signatureAlgorithm` with
+  parameters or other than the one inside `tbsCertificate`, or a length in a longer form than needed fails
+  the chain.
 
 # Version 1.0.0
 

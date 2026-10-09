@@ -30,9 +30,11 @@ PHP 8.3 or later with the _GMP_, _Mbstring_, _OpenSSL_ and _Sodium_ extensions. 
 suggested, because decoding a large number from untrusted CBOR without it takes time quadratic in the
 number's length, and every attestation is untrusted input.
 
-The library depends on [phpseclib](https://phpseclib.com/) 4 for X.509, on
-[spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR, and on
-[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface.
+The library depends on [spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR and on
+[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface, and its Composer package
+requires [phpseclib](https://phpseclib.com/) 4. It reads certificates with its own DER reader and checks
+signatures and keys with OpenSSL, so verification calls no phpseclib code (see
+[Using phpseclib Elsewhere in Your Application](#using-phpseclib-elsewhere-in-your-application)).
 
 ## Installation
 
@@ -433,33 +435,37 @@ SHA-256, SHA-384 or SHA-512, give its root and intermediate a key usage extensio
 `InvalidArgumentException` for a root without an EC key or without `keyCertSign`; a chain that misses any of
 the rest fails every attestation with `CertificateChain`. An issuer without a key usage extension fails like
 one without `keyCertSign`, and each certificate must name its issuer with exactly the bytes of the issuer's
-subject name.
+subject name. Every certificate, the root included, must be DER where the library reads it, as any CA's
+output is: lengths in their shortest form, booleans `0x00` or `0xFF`, validity times in UTC with seconds,
+the key usage without trailing zero bits, and each of the key usage, key identifier, `basicConstraints`
+and nonce extensions at most once.
 
 ## Using phpseclib Elsewhere in Your Application
 
-The library needs phpseclib 4. phpseclib 3 and 4 are the same Composer package, so your application can
-use only phpseclib 4 alongside it.
+The library's Composer package requires phpseclib 4. phpseclib 3 and 4 are the same Composer package, so
+your application can use only phpseclib 4 alongside it.
 
-`AttestationVerifier` sets none of phpseclib's process-wide `X509` settings and depends on none of them:
-the CA store, the validation date, the CRL and URL-fetch callbacks, the extension maps and the switches of
-issuer matching. They are static properties, shared by every `X509` object in the process, so the library
-checks the chain without them: it verifies each issuer's ECDSA signature itself with OpenSSL, before
-phpseclib parses the certificate, and calls neither `X509::validateSignature()` nor `X509::isIssuerOf()`. It
-neither reads nor adds to the store filled by `X509::addCA()`, ignores the date set with
-`X509::setTargetValidationDate()` and the callback set with `X509::setCRLLookupCallback()`, and never
-reaches phpseclib's download of issuer certificates from `authorityInfoAccess` URLs, which resolves the host
-name before it asks the callback set with `X509::setURLFetchCallback()`. `X509::ignoreKeyUsage()`,
-`X509::ignoreBasicConstraints()` and `X509::looseDNComparison()` change nothing: the library itself requires
-`keyCertSign` of each issuer, the CA flag of the intermediate, matching key identifiers, and an issuer name
-equal byte for byte to the issuer's subject name. It matches extensions and the signature algorithm by
-OID, so names given to OIDs with `ASN1::loadOIDs()` change nothing either. It decodes the App Attest nonce
-extension itself and registers no ASN.1 map, and a map your code registers for the extension's OID,
-`1.2.840.113635.100.8.2`, with `X509::registerExtension()` does not affect verification.
+phpseclib keeps its settings in static properties, shared by every phpseclib object in the process, so a
+setting made by one component applies to all of them. Neither `AttestationVerifier` nor
+`TrustAnchor::fromPem()` calls phpseclib: the library takes certificates apart with its own strict DER reader
+and checks each signature and key with OpenSSL. None of phpseclib's process-wide settings changes a
+verification result, and the library changes none of them:
 
-Verification leaves ASN.1 cache invalidation as your code set it. `TrustAnchor::fromPem()` does not: it
-parses the certificate with phpseclib's `X509`, which turns cache invalidation back on whenever it decodes a
-certificate's extensions, so if your code calls `ASN1::disableCacheInvalidation()`, call it again after
-`fromPem()`.
+* **ASN.1:** `ASN1::enableBlobsOnBadDecodes()`, under which phpseclib maps a malformed element partly
+  instead of failing, `ASN1::setRecursionDepth()`, `ASN1::loadOIDs()`, `ASN1::disableCacheInvalidation()`,
+  `ASN1::ignoreEncodedCache()` and `ASN1::enable64BitOIDHandling()`.
+* **X.509:** the CA store of `X509::addCA()`, `X509::setTargetValidationDate()`,
+  `X509::setCRLLookupCallback()`, `X509::setURLFetchCallback()`, `X509::setRecurLimit()`, the extension
+  maps of `X509::registerExtension()`, `X509::ignoreKeyUsage()`, `X509::ignoreBasicConstraints()`,
+  `X509::looseDNComparison()` and `X509::enableBinaryOutput()`.
+* **Keys and numbers:** `PKCS::requirePEM()` and `PKCS::requireDER()`, `AsymmetricKey::addFileFormat()`,
+  `forceEngine()` on the key classes, `AsymmetricKey::setOpenSSLConfigPath()`, the EC curve settings
+  and `BigInteger::setEngine()`.
+
+The library itself requires `keyCertSign` of each issuer, the CA flag of the intermediate, matching key
+identifiers and an issuer name equal byte for byte to the issuer's subject name, matches extensions and the
+signature algorithm by their encoded OIDs, and decodes the App Attest nonce extension itself. Verification
+makes no network call: issuer certificates named in `authorityInfoAccess` are never fetched.
 
 ## Testing Your Own Code
 

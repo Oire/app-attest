@@ -285,6 +285,31 @@ final class BuildersTest extends TestCase
         self::assertSame(1, self::extensionCount($authorityKeyIdentifierTwice->intermediateDer, AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID));
     }
 
+    public function testCertificatesCanBeEditedAndSignedAgain(): void
+    {
+        $basicConstraints = "\x30\x06\x01\x01\xff\x02\x01\x00";
+        $setBasicConstraints = static fn(string $tbs): string => SignedCertificate::withExtensionValue($tbs, SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => $basicConstraints);
+        $replaced = AttestationBuilder::create()
+            ->withIntermediateTbsCertificate($setBasicConstraints)
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withFields($tbs, static fn(array $fields): array => [...$fields, "\x05\x00"]))
+            ->build();
+        $added = AttestationBuilder::create()
+            ->withIntermediateNotCa()
+            ->withIntermediateTbsCertificate($setBasicConstraints)
+            ->build();
+        $credentialFields = SignedCertificate::elements(SignedCertificate::content(SignedCertificate::split($replaced->credentialDer)[0]));
+
+        foreach ([$replaced, $added] as $attestation) {
+            self::assertSame(1, mb_substr_count($attestation->intermediateDer, SignedCertificate::BASIC_CONSTRAINTS, '8bit'));
+            self::assertStringContainsString("\x04\x08" . $basicConstraints, $attestation->intermediateDer);
+            self::assertTrue(self::signedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
+            self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+        }
+
+        self::assertSame(["\x05\x00"], array_slice($credentialFields, -1));
+        self::assertStringContainsString(SignedCertificate::extension(SignedCertificate::BASIC_CONSTRAINTS, $basicConstraints), $added->intermediateDer);
+    }
+
     public function testRootCanLackKeyUsage(): void
     {
         $attestation = AttestationBuilder::create()
