@@ -30,6 +30,7 @@ use Oire\AppAttest\Tests\Support\Damage;
 use Oire\AppAttest\Tests\Support\Damaged;
 use Oire\AppAttest\Tests\Support\EcKey;
 use Oire\AppAttest\Tests\Support\Pem;
+use Oire\AppAttest\TrustAnchor;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\AttestedKey;
 use Oire\AppAttest\Value\BundleId;
@@ -416,6 +417,12 @@ final class AttestationVerifierTest extends TestCase
         yield 'garbage intermediate' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, 'garbage']];
         yield 'no certificates' => [static fn(BuiltAttestation $a): array => array_slice([$a->credentialDer], 1)];
         yield 'foreign intermediate' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, AttestationBuilder::create()->build()->intermediateDer]];
+        yield 'credential with a trailing byte' => [static fn(BuiltAttestation $a): array => [$a->credentialDer . "\x00", $a->intermediateDer]];
+        yield 'intermediate with a trailing byte' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, $a->intermediateDer . "\x00"]];
+        yield 'intermediate followed by its own PEM' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, $a->intermediateDer . "\n" . Pem::fromDer($a->intermediateDer, Pem::CERTIFICATE)]];
+        yield 'indefinite-length credential' => [static fn(BuiltAttestation $a): array => ["\x30\x80" . mb_substr($a->credentialDer, 4, null, '8bit') . "\x00\x00", $a->intermediateDer]];
+        yield '64 KiB of nested sequences as the credential' => [static fn(BuiltAttestation $a): array => [self::nestedSequences(65536), $a->intermediateDer]];
+        yield '64 KiB of nested sequences as the intermediate' => [static fn(BuiltAttestation $a): array => [$a->credentialDer, self::nestedSequences(65536)]];
     }
 
     /**
@@ -428,6 +435,34 @@ final class AttestationVerifierTest extends TestCase
         $cbor = self::attestationObject(self::x5c(...$certificates($attestation)), $attestation->authData);
 
         self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
+    public function testIntermediateWithAnotherCaInAppendedPemFailsTheChain(): void
+    {
+        $victim = AttestationBuilder::create()->build();
+        $attacker = AttestationBuilder::create()->build();
+        $intermediate = $victim->intermediateDer . "\n" . Pem::fromDer($attacker->intermediateDer, Pem::CERTIFICATE);
+        $cbor = self::attestationObject(self::x5c($attacker->credentialDer, $intermediate), $attacker->authData);
+        $verifier = new AttestationVerifier($victim->trustAnchor(), $attacker->clock());
+
+        self::assertFailure(
+            AttestationFailureReason::CertificateChain,
+            static fn() => $verifier->verify($cbor, $attacker->clientDataHash, $attacker->keyId, $attacker->app, [Environment::Development]),
+        );
+    }
+
+    public function testAppleIntermediateWithAnotherCaInAppendedPemFailsTheChain(): void
+    {
+        $appleIntermediate = self::certificatesOf(Fixtures::attestation('takimoto3-apple-guide')->bytes)[1];
+        $attacker = AttestationBuilder::create()->build();
+        $intermediate = $appleIntermediate . "\n" . Pem::fromDer($attacker->intermediateDer, Pem::CERTIFICATE);
+        $cbor = self::attestationObject(self::x5c($attacker->credentialDer, $intermediate), $attacker->authData);
+        $verifier = new AttestationVerifier(TrustAnchor::apple(), $attacker->clock());
+
+        self::assertFailure(
+            AttestationFailureReason::CertificateChain,
+            static fn() => $verifier->verify($cbor, $attacker->clientDataHash, $attacker->keyId, $attacker->app, [Environment::Development]),
+        );
     }
 
     /**
@@ -760,6 +795,20 @@ final class AttestationVerifierTest extends TestCase
         self::assertIsString($authData);
 
         return $authData;
+    }
+
+    /**
+     * Definite-length SEQUENCEs nested inside each other, at least this many bytes in all.
+     */
+    private static function nestedSequences(int $length): string
+    {
+        $der = '';
+
+        while (mb_strlen($der, '8bit') < $length) {
+            $der = "\x30" . ASN1::encodeLength(mb_strlen($der, '8bit')) . $der;
+        }
+
+        return $der;
     }
 
     private static function chunked(string $bytes): IndefiniteLengthByteStringObject

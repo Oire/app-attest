@@ -8,7 +8,8 @@ The first release: verification of Apple App Attest attestations and assertions,
 * **`AttestationVerifier`** checks an attestation in Apple's order: the `apple-appattest` format, a
   two-certificate chain to the trust anchor valid at the clock's time with a CA intermediate, the nonce
   in the credential certificate, the key id, the `rpIdHash`, a zero counter, the environment and the
-  `credentialId`. It returns an `AttestedKey` with the key id, the public key as PEM, the environment, the
+  `credentialId`. Each certificate must be exactly one DER `SEQUENCE` of at most 4096 bytes before
+  phpseclib reads it, and each issuer is checked as the certificate already parsed. It returns an `AttestedKey` with the key id, the public key as PEM, the environment, the
   receipt and counter 0. `clientDataHash` may be any length, as in Apple's own sample.
 * **`AssertionVerifier`** checks an assertion's ECDSA P-256 signature over the nonce, the SHA-256 of
   `authenticatorData` followed by the SHA-256 of `clientData`, its `rpIdHash` and a counter strictly

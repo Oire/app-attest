@@ -35,11 +35,17 @@ use Throwable;
  * phpseclib does not check that an issuer is a CA, so the intermediate's basicConstraints are checked here,
  * and its fetching of caIssuers URLs is turned off on every call: verification makes no network call.
  *
+ * Every certificate must be exactly one DER SEQUENCE, and an x5c entry at most MAX_LENGTH bytes, before
+ * phpseclib reads it: phpseclib ignores bytes after the first element, and its decoder's memory grows with
+ * the square of the nesting depth. Each issuer is handed to phpseclib as the certificate already parsed and
+ * checked, never as bytes it would parse again with PEM auto-detection.
+ *
  * @internal
  */
 final readonly class CertificateChain
 {
     private const int LENGTH = 2;
+    private const int MAX_LENGTH = 4096;
 
     /**
      * @param ?string $nonce                the octet string inside the nonce extension, if well-formed
@@ -64,24 +70,35 @@ final readonly class CertificateChain
 
         $credentialDer = $certificates[0];
         $intermediateDer = $certificates[1];
+        $rootDer = Pem::tryDecode($anchor->pem, Pem::CERTIFICATE);
+
+        if (
+            $rootDer === null
+            || !self::isOneSequence($rootDer)
+            || !self::isOneSequence($intermediateDer, self::MAX_LENGTH)
+            || !self::isOneSequence($credentialDer, self::MAX_LENGTH)
+        ) {
+            return null;
+        }
+
         X509::disableURLFetch();
         NonceExtension::register();
 
         try {
-            return ErrorGuard::call(static function() use ($credentialDer, $intermediateDer, $anchor, $time): ?self {
+            return ErrorGuard::call(static function() use ($credentialDer, $intermediateDer, $rootDer, $time): ?self {
                 $root = new X509();
 
-                if (!is_array($root->loadX509($anchor->pem)) || !$root->validateDate($time)) {
+                if (!is_array($root->loadX509($rootDer, X509::FORMAT_DER)) || !$root->validateDate($time)) {
                     return null;
                 }
 
-                $intermediate = self::issuedAndValid($intermediateDer, $anchor->pem, $time);
+                $intermediate = self::issuedAndValid($intermediateDer, $root, $time);
 
                 if ($intermediate === null || !self::isCa($intermediate)) {
                     return null;
                 }
 
-                $credential = self::issuedAndValid($credentialDer, $intermediateDer, $time);
+                $credential = self::issuedAndValid($credentialDer, $intermediate, $time);
 
                 return $credential === null ? null : new self(self::nonceOf($credential), self::subjectPublicKeyInfoOf($credential));
             });
@@ -90,12 +107,50 @@ final readonly class CertificateChain
         }
     }
 
-    private static function issuedAndValid(string $der, string $issuer, DateTimeInterface $time): ?X509
+    /**
+     * Whether the bytes are one DER SEQUENCE with a definite length and nothing after it.
+     *
+     * @psalm-pure
+     */
+    private static function isOneSequence(string $der, int $maxLength = PHP_INT_MAX): bool
+    {
+        $length = mb_strlen($der, '8bit');
+
+        if ($length < 2 || $length > $maxLength || ord($der[0]) !== 0x30) {
+            return false;
+        }
+
+        $first = ord($der[1]);
+
+        if ($first < 0x80) {
+            return $length === 2 + $first;
+        }
+
+        $lengthBytes = $first & 0x7F;
+
+        if ($lengthBytes === 0 || $lengthBytes > 4 || $length < 2 + $lengthBytes) {
+            return false;
+        }
+
+        $contentLength = 0;
+
+        for ($i = 2; $i < 2 + $lengthBytes; ++$i) {
+            $contentLength = ($contentLength << 8) | ord($der[$i]);
+        }
+
+        return $length === 2 + $lengthBytes + $contentLength;
+    }
+
+    private static function issuedAndValid(string $der, X509 $issuer, DateTimeInterface $time): ?X509
     {
         $certificate = new X509();
+        $issuerCertificate = $issuer->getCurrentCert();
+
+        /** @psalm-suppress InvalidArgument, InvalidCast loadCA() takes the array loadX509() returned, though its docblock says string */
+        $issuerLoaded = is_array($issuerCertificate) && $certificate->loadCA($issuerCertificate);
 
         if (
-            !$certificate->loadCA($issuer)
+            !$issuerLoaded
             || !is_array($certificate->loadX509($der, X509::FORMAT_DER))
             || $certificate->validateSignature() !== true
             || !$certificate->validateDate($time)

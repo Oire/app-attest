@@ -213,7 +213,8 @@ log. Do not send them to the client: refuse with a generic answer.
 * `Format` — the document is not a well-formed `apple-appattest` object, `authData` is too short, or the
   credential certificate does not hold an uncompressed P-256 key.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
-  an intermediate that is not a CA, or is not valid at the clock's time.
+  an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is not exactly
+  one DER `SEQUENCE` with nothing after it, or is longer than 4096 bytes (Apple's are about 1 KiB).
 * `Nonce` — the credential certificate has no nonce extension, or its nonce does not match `authData` and
   `$clientDataHash`. A `clientDataHash` formed differently from the app's ends here.
 * `KeyId` — the credential certificate's key, or the `credentialId` in `authData`, does not match the key
