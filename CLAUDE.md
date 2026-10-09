@@ -5,7 +5,7 @@
 `oire/app-attest` verifies Apple App Attest attestations and assertions in PHP, following Apple's
 "Validating apps that connect to your server". It verifies and nothing else: no state, no key storage, no
 challenges, no network, no logging. Namespace `Oire\AppAttest\` (PSR-4 mapped to `src/`); tests
-`Oire\AppAttest\Tests\`. Apache-2.0. The implementation plan is `docs/plans/001-app-attest-library.md`.
+`Oire\AppAttest\Tests\`. Apache-2.0. The implementation plan is `docs/plans/completed/001-app-attest-library.md`.
 
 ## Quick Reference
 
