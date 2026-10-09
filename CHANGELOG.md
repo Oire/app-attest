@@ -28,9 +28,10 @@ The first release: verification of Apple App Attest attestations and assertions,
   (`apple_bundle_version_01` or `bundleVersion`, a text string). `AttestedKey` reports them as
   `$validationCategory`, `$bundleVersion` and `validationCategory()`. A `LaunchPolicy`, passed as the
   optional last argument of either `verify()`, enforces them with the reasons `ValidationCategory` and
-  `BundleVersion`; without one they are only reported, and a missing or malformed extensions area is
-  ignored. `LaunchPolicy::allowing()` needs at least one category. `ValidationCategory` is an int-backed
-  enum with Apple's launch-constraint numbering.
+  `BundleVersion`; without one an attestation only reports them, and a missing or malformed extensions
+  area is ignored. `AssertionVerifier::verify()` returns only the counter, so an assertion's values are
+  enforced but not reported. `LaunchPolicy::allowing()` needs at least one category. `ValidationCategory`
+  is an int-backed enum with Apple's launch-constraint numbering.
 * **Typed failures:** `AttestationException` and `AssertionException`, both extending the abstract
   `AppAttestException`, carry a `$reason` enum case naming the failed check. Caller errors, such as an
   invalid team id or public key, or an `$allowed` list that is empty or not of `Environment` cases, are

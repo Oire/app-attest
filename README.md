@@ -218,8 +218,8 @@ versions append this map to `authData` after the credential public key, and to a
 
 Apple names no value you must accept and says nothing of a device that sends neither, and older devices
 do send neither: none of the iOS 14 vectors this library is tested with carries them. So the library
-reports the values and enforces them only when you ask. Without a policy, nothing about them is checked,
-and an extensions area that is missing or malformed is ignored.
+reports the values of an attestation on `AttestedKey` and enforces them only when you ask. Without a
+policy, nothing about them is checked, and an extensions area that is missing or malformed is ignored.
 
 `Oire\AppAttest\Value\ValidationCategory` is an int-backed enum: `Platform` (1, an operating system
 executable), `TestFlight` (2), `Development` (3, signed by a development identity), `AppStore` (4),

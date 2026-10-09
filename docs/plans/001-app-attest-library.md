@@ -25,9 +25,13 @@ to the caller, who passes the stored public key and counter in and stores the ne
 - [x] `AssertionVerifier::verify` accepts every genuine assertion, returns the new counter, and rejects
       a bad signature, a wrong `rpIdHash`, a counter not above the previous one and a malformed document,
       each with its own `$reason`
-- [x] ➕ both verifiers report the launch validation category and bundle version from the authenticator
-      data extensions and, only with a `LaunchPolicy`, refuse them with `ValidationCategory` and
-      `BundleVersion`; without a policy every earlier result is unchanged (Task 7)
+- [x] ➕ `AttestationVerifier` reports the launch validation category and bundle version from the
+      authenticator data extensions on `AttestedKey`; both verifiers, only with a `LaunchPolicy`, refuse
+      them with `ValidationCategory` and `BundleVersion`; without a policy every earlier result is
+      unchanged (Task 7)
+      ⚠️ `AssertionVerifier` enforces the launch values but does not report them: it still returns only
+      the counter. Whether it should return a result carrying them is open for the maintainer before
+      `v1.0.0` (Post-completion) (review, 2026-10-09)
 - [x] the pinned Apple App Attest root's SHA-256 fingerprint is checked when the root is loaded and
       asserted by a test, so a swapped file fails loudly
 - [x] time-dependent checks use an injected PSR-20 clock, so the golden vectors verify at their own
@@ -542,6 +546,9 @@ request, so every existing call keeps its behavior.
       `ValidationCategory`, and a bundle version that is absent or refused by the closure is the new reason
       `BundleVersion`; both run after every existing check. Add both cases to `AttestationFailureReason`
       and `AssertionFailureReason`
+      ⚠️ Only `AttestationVerifier` reports the values (on `AttestedKey`); `AssertionVerifier::verify()`
+      keeps returning the counter, so on the assertion side the values are enforced but not visible
+      (review, 2026-10-09)
 - [x] builders can write an extensions map (either category encoding, a bundle version, a malformed map)
       into `authData` and `authenticatorData`
 - [x] tests: the Apple guide vector reports category 1 and bundle version `"1"`, is accepted by a policy
@@ -669,6 +676,9 @@ state: storage, challenges and the counter race are the caller's.
      `gh api repos/Oire/app-attest/hooks -f name=web -f "config[url]=https://packagist.org/api/github?username=<username>" -f "config[content_type]=json" -f "config[secret]=<token>" -F active=true -f "events[]=push"`
   3. Check: the hook's **Recent Deliveries** shows a 2xx response after the next push, and the package
      page on Packagist no longer warns that it is not auto-updated.
+- Before tagging `v1.0.0`, decide whether `AssertionVerifier::verify()` keeps returning the counter
+  (the launch values enforced but never reported) or returns a readonly result with the counter, the
+  validation category and the bundle version; changing it after `v1.0.0` breaks the API.
 - Tell AccessMind the version to require.
 - Before a later release: re-fetch Apple's root and compare its fingerprint with the constant.
 - When PHP 8.3 reaches end of life (2027-12-31): drop it from the CI matrix and raise `"php"` and
