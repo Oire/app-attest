@@ -1,4 +1,4 @@
-# Version 2.0.0 (Unreleased)
+# Version 2.0.0
 
 The library no longer depends on phpseclib: it takes certificates apart with its own strict DER reader and
 checks signatures and keys with OpenSSL, so no process-wide phpseclib setting changes a verification result.
