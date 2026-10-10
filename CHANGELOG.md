@@ -20,14 +20,16 @@ test chains and roots that do not look like Apple's may now be refused (see Brea
   over SHA-256, SHA-384 or SHA-512, each issuer to have exactly one key usage extension that includes
   `keyCertSign`, each certificate's issuer Name to be byte for byte its issuer's subject Name, and an
   authority key identifier, when present, to name the issuer's subject key identifier and, if it holds one,
-  the issuer's serial number. The intermediate and the credential certificate may mark critical only the
-  extensions the library processes (`basicConstraints`, key usage, the key identifiers and the nonce
-  extension), as RFC 5280 requires. Each certificate must be a v3 certificate and DER where the library reads
-  it: lengths in their shortest form, nothing after the extensions, booleans `0x00` or `0xFF`, an extension's
-  critical flag left out rather than written as FALSE, integers and OIDs in their shortest form, validity
-  times in UTC with seconds and without fractions, the key usage without trailing zero bits or bits past
-  `decipherOnly`, and each of the key usage, key identifier, `basicConstraints` and nonce extensions at most
-  once. A chain that 1.0 accepted otherwise fails with `CertificateChain`, or `Nonce` for a malformed nonce
+  the issuer's serial number. Each certificate may mark critical only the extensions the library processes
+  for it, as RFC 5280 requires: `basicConstraints`, key usage and the key identifiers for the intermediate,
+  these and the nonce extension for the credential certificate. The credential certificate's key usage, if
+  any, must be well-formed and its `basicConstraints`, if any, the empty `SEQUENCE` Apple's carries (`cA`
+  false, no path length), critical or not, and every key identifier must be well-formed even where no match
+  reads it. Each certificate must be a v3 certificate and DER where the library reads it: lengths in their
+  shortest form, nothing after the extensions, booleans `0x00` or `0xFF`, an extension's critical flag left
+  out rather than written as FALSE, integers and OIDs in their shortest form, validity times in UTC with
+  seconds and without fractions, the key usage without trailing zero bits or bits past `decipherOnly`, and
+  each of the key usage, key identifier, `basicConstraints` and nonce extensions at most once. A chain that 1.0 accepted otherwise fails with `CertificateChain`, or `Nonce` for a malformed nonce
   extension.
 * **The library no longer changes phpseclib for the rest of the application.** 1.0 disabled URL fetching
   and registered the nonce extension's map process-wide. Applications no longer need to call

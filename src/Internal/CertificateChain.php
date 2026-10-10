@@ -36,8 +36,12 @@ use OpenSSLAsymmetricKey;
  * another component could change, so no setting of any library changes what a certificate decodes to or
  * whether a chain passes. Each link is checked signature first: the issuer's ECDSA signature over the
  * original tbsCertificate bytes, then the issuer Name, key usage and key identifiers, the validity period and
- * the intermediate's basicConstraints. The intermediate and the credential certificate may carry no critical
- * extension the chain does not process, as RFC 5280 requires. Verification makes no network call.
+ * the intermediate's basicConstraints. The credential certificate, an end entity, may hold one well-formed
+ * keyUsage and one basicConstraints that leaves cA FALSE, and every key identifier of the intermediate and
+ * the credential certificate must be well-formed. Each certificate may mark critical only the
+ * extensions the chain processes for it, as RFC 5280 requires: basicConstraints, key usage and the key
+ * identifiers for the intermediate, these and the nonce extension for the credential certificate. The root, a
+ * trust anchor, is not checked for them. Verification makes no network call.
  *
  * Every certificate must be DER, and an x5c entry at most MAX_LENGTH bytes, so its bytes cannot be altered
  * and still pass, ECDSA's own choice of s or n - s aside.
@@ -62,9 +66,19 @@ final readonly class CertificateChain
     private const int AUTHORITY_CERT_SERIAL_NUMBER_TAG = 0x82;
 
     /**
-     * The extensions the chain processes, the only ones a certificate it checks may mark critical.
+     * The extensions the chain processes for the intermediate, the only ones it may mark critical.
      */
-    private const array PROCESSED_EXTENSIONS = [
+    private const array INTERMEDIATE_EXTENSIONS = [
+        self::BASIC_CONSTRAINTS,
+        self::KEY_USAGE,
+        self::SUBJECT_KEY_IDENTIFIER,
+        self::AUTHORITY_KEY_IDENTIFIER,
+    ];
+
+    /**
+     * The extensions the chain processes for the credential certificate, the only ones it may mark critical.
+     */
+    private const array CREDENTIAL_EXTENSIONS = [
         self::BASIC_CONSTRAINTS,
         self::KEY_USAGE,
         self::SUBJECT_KEY_IDENTIFIER,
@@ -124,14 +138,17 @@ final readonly class CertificateChain
                 }
 
                 if (
-                    !self::hasOnlyProcessedCriticalExtensions($intermediate)
-                    || !self::hasOnlyProcessedCriticalExtensions($credential)
+                    !self::marksCriticalOnly($intermediate, self::INTERMEDIATE_EXTENSIONS)
+                    || !self::marksCriticalOnly($credential, self::CREDENTIAL_EXTENSIONS)
                     || !self::isValidAt($root, $time)
                     || !self::isValidAt($intermediate, $time)
                     || !self::isValidAt($credential, $time)
                     || !self::isIssuerOf($root, $intermediate)
                     || !self::isCa($intermediate)
+                    || !self::hasWellFormedKeyIdentifiers($intermediate)
                     || !self::isIssuerOf($intermediate, $credential)
+                    || !self::isEndEntity($credential)
+                    || !self::hasWellFormedKeyIdentifiers($credential)
                 ) {
                     return null;
                 }
@@ -175,11 +192,13 @@ final readonly class CertificateChain
     }
 
     /**
+     * @param list<string> $processed the extensions the chain processes for this certificate
+     *
      * @psalm-capabilities read-props
      */
-    private static function hasOnlyProcessedCriticalExtensions(Certificate $certificate): bool
+    private static function marksCriticalOnly(Certificate $certificate, array $processed): bool
     {
-        return array_diff($certificate->criticalExtensionIdentifiers(), self::PROCESSED_EXTENSIONS) === [];
+        return array_diff($certificate->criticalExtensionIdentifiers(), $processed) === [];
     }
 
     /**
@@ -221,23 +240,52 @@ final readonly class CertificateChain
     }
 
     /**
-     * Whether the certificate has one key usage extension, a KeyUsage BIT STRING in DER with its trailing
-     * zero bits removed and none past decipherOnly, and it includes keyCertSign.
+     * Whether the certificate has one key usage extension, well-formed, and it includes keyCertSign.
      *
      * @psalm-capabilities read-props
      */
     private static function canSignCertificates(Certificate $certificate): bool
     {
         $values = $certificate->extensionValues(self::KEY_USAGE);
-        $keyUsage = count($values) === 1 && isset($values[0]) ? Der::tryOne($values[0]) : null;
+        $keyUsage = count($values) === 1 && isset($values[0]) ? self::keyUsageOf($values[0]) : null;
+
+        return $keyUsage !== null && Der::isBitSet($keyUsage, self::KEY_CERT_SIGN);
+    }
+
+    /**
+     * A KeyUsage BIT STRING in DER, its trailing zero bits removed, at least one bit set and none past
+     * decipherOnly, or null if the value is not one.
+     *
+     * @psalm-pure
+     */
+    private static function keyUsageOf(string $value): ?DerElement
+    {
+        $keyUsage = Der::tryOne($value);
 
         if (!Der::isBitString($keyUsage)) {
-            return false;
+            return null;
         }
 
         $bits = Der::bitCount($keyUsage);
 
-        return $bits <= self::KEY_USAGE_BITS && Der::isBitSet($keyUsage, self::KEY_CERT_SIGN) && Der::isBitSet($keyUsage, $bits - 1);
+        return $bits <= self::KEY_USAGE_BITS && Der::isBitSet($keyUsage, $bits - 1) ? $keyUsage : null;
+    }
+
+    /**
+     * Whether the certificate holds at most one subject key identifier, a DER OCTET STRING, and at most one
+     * authority key identifier, a DER AuthorityKeyIdentifier, whether or not the chain matches them.
+     *
+     * @psalm-capabilities read-props
+     */
+    private static function hasWellFormedKeyIdentifiers(Certificate $certificate): bool
+    {
+        $subjectKeyIdentifiers = $certificate->extensionValues(self::SUBJECT_KEY_IDENTIFIER);
+        $authorityKeyIdentifiers = $certificate->extensionValues(self::AUTHORITY_KEY_IDENTIFIER);
+
+        return count($subjectKeyIdentifiers) <= 1
+            && count($authorityKeyIdentifiers) <= 1
+            && (!isset($subjectKeyIdentifiers[0]) || Der::hasTag(Der::tryOne($subjectKeyIdentifiers[0]), Der::OCTET_STRING))
+            && (!isset($authorityKeyIdentifiers[0]) || self::authorityKeyIdentifierOf($authorityKeyIdentifiers[0]) !== null);
     }
 
     /**
@@ -306,20 +354,66 @@ final readonly class CertificateChain
     }
 
     /**
-     * Whether the certificate has one basicConstraints extension, BasicConstraints ::= SEQUENCE { cA BOOLEAN
-     * DEFAULT FALSE, pathLenConstraint INTEGER (0..MAX) OPTIONAL } in DER, with cA true.
+     * Whether the certificate has one basicConstraints extension, well-formed, with cA TRUE.
      *
      * @psalm-capabilities read-props
      */
     private static function isCa(Certificate $certificate): bool
     {
         $values = $certificate->extensionValues(self::BASIC_CONSTRAINTS);
-        $fields = count($values) === 1 && isset($values[0]) ? Der::tryOne($values[0])?->children(Der::SEQUENCE) : null;
+        $basicConstraints = count($values) === 1 && isset($values[0]) ? self::basicConstraintsOf($values[0]) : null;
 
-        return $fields !== null
-            && count($fields) <= 2
-            && Der::isTrue($fields[0] ?? null)
-            && (count($fields) === 1 || Der::isNonNegativeInteger($fields[1] ?? null));
+        return $basicConstraints !== null && $basicConstraints[0];
+    }
+
+    /**
+     * Whether the certificate holds at most one key usage extension and at most one basicConstraints
+     * extension, each well-formed, critical or not, and its basicConstraints, if any, is empty: cA FALSE and no
+     * pathLenConstraint, which RFC 5280 allows only with cA TRUE.
+     *
+     * @psalm-capabilities read-props
+     */
+    private static function isEndEntity(Certificate $certificate): bool
+    {
+        $keyUsages = $certificate->extensionValues(self::KEY_USAGE);
+        $basicConstraints = $certificate->extensionValues(self::BASIC_CONSTRAINTS);
+
+        return count($keyUsages) <= 1
+            && count($basicConstraints) <= 1
+            && (!isset($keyUsages[0]) || self::keyUsageOf($keyUsages[0]) !== null)
+            && (!isset($basicConstraints[0]) || self::basicConstraintsOf($basicConstraints[0]) === [false, false]);
+    }
+
+    /**
+     * BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER (0..MAX) OPTIONAL }
+     * in DER, which leaves out a FALSE cA, as whether cA is TRUE and whether a pathLenConstraint is present,
+     * or null if the value is not one.
+     *
+     * @return ?array{bool, bool}
+     *
+     * @psalm-pure
+     */
+    private static function basicConstraintsOf(string $value): ?array
+    {
+        $fields = Der::tryOne($value)?->children(Der::SEQUENCE);
+
+        if ($fields === null) {
+            return null;
+        }
+
+        $ca = Der::isTrue($fields[0] ?? null);
+
+        if ($ca) {
+            array_shift($fields);
+        }
+
+        $pathLength = Der::isNonNegativeInteger($fields[0] ?? null);
+
+        if ($pathLength) {
+            array_shift($fields);
+        }
+
+        return $fields === [] ? [$ca, $pathLength] : null;
     }
 
     /**

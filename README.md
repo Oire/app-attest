@@ -321,8 +321,9 @@ log. Do not send them to the client: refuse with a generic answer.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
   an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is longer than
   4096 bytes (Apple's are about 1 KiB), is not DER where the library reads it, marks critical an extension
-  the library does not process, is not signed by its issuer with ECDSA over SHA-256, SHA-384 or SHA-512, or
-  its issuer lacks `keyCertSign`, has another subject Name or another key identifier (see Trust Anchor).
+  the library does not process for that certificate, is not signed by its issuer with ECDSA over SHA-256,
+  SHA-384 or SHA-512, or its issuer lacks `keyCertSign`, has another subject Name or another key identifier;
+  or the credential certificate claims to be a CA (see Trust Anchor).
 * `Nonce` — the credential certificate has no nonce extension, has it twice or malformed, or its nonce does
   not match `authData` and `$clientDataHash`. A `clientDataHash` formed differently from the app's ends
   here.
@@ -444,8 +445,11 @@ A test chain must, like Apple's:
 * name each issuer with exactly the bytes of the issuer's subject Name and, if a certificate carries an
   authority key identifier, name in it the issuer's subject key identifier and, if it holds one, the
   issuer's serial number;
-* mark critical, in the intermediate and the credential certificate, only `basicConstraints`, the key
-  usage, the key identifiers and the nonce extension;
+* mark critical, in the intermediate, only `basicConstraints`, the key usage and the key identifiers, and
+  in the credential certificate only these and the nonce extension;
+* give the credential certificate, if it has them, one well-formed key usage and one `basicConstraints`
+  that is the empty `SEQUENCE` (`cA` false, no path length), as Apple's does, and keep every subject and
+  authority key identifier well-formed;
 * keep all three certificates valid at the clock's time;
 * be v3 certificates and DER where the library reads them: lengths, integers and OIDs in their shortest
   form, booleans `0x00` or `0xFF`, a critical flag left out rather than FALSE, validity times in UTC with

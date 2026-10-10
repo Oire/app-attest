@@ -449,6 +449,33 @@ final class AttestationVerifierTest extends TestCase
         yield 'credential with an extension whose critical flag is 0x01' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0a\x06\x03\x55\x1d\x62\x01\x01\x01\x04\x00"]), $chain];
         yield 'credential with an extension whose critical flag is an explicit FALSE' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0a\x06\x03\x55\x1d\x62\x01\x01\x00\x04\x00"]), $chain];
         yield 'credential with an unknown critical extension' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0b\x06\x03\x55\x1d\x62\x01\x01\xff\x04\x01\x00"]), $chain];
+        yield 'credential whose critical key usage keeps a trailing zero bit' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x03\x02\x00\x80"]]), $chain];
+        yield 'credential whose critical key usage sets no bit' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x03\x01\x00"]]), $chain];
+        yield 'credential whose critical key usage is an INTEGER' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x02\x01\x05"]]), $chain];
+        yield 'credential whose key usage, not critical, has an element after it' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x03\x02\x07\x80" . $null, false]]), $chain];
+        yield 'credential with its key usage twice' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x03\x02\x07\x80"], [SignedCertificate::KEY_USAGE, "\x03\x02\x07\x80"]]), $chain];
+        yield 'credential whose critical basicConstraints writes cA FALSE' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x03\x01\x01\x00"]]), $chain];
+        yield 'credential whose critical basicConstraints is a NULL' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, $null]]), $chain];
+        yield 'credential whose critical basicConstraints has a byte after it' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x00\x00"]]), $chain];
+        yield 'credential whose critical basicConstraints has a path length without cA' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x03\x02\x01\x00"]]), $chain];
+        yield 'credential whose critical basicConstraints says cA TRUE' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x03\x01\x01\xff"]]), $chain];
+        yield 'credential whose critical basicConstraints says cA TRUE with a path length' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x06\x01\x01\xff\x02\x01\x00"]]), $chain];
+        yield 'credential whose basicConstraints, not critical, says cA TRUE' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x03\x01\x01\xff", false]]), $chain];
+        yield 'credential with basicConstraints twice' => [self::credentialWithExtensions([[SignedCertificate::BASIC_CONSTRAINTS, "\x30\x00"], [SignedCertificate::BASIC_CONSTRAINTS, "\x30\x00"]]), $chain];
+        yield 'credential whose critical subject key identifier is an INTEGER' => [self::credentialWithExtensions([[SignedCertificate::SUBJECT_KEY_IDENTIFIER, "\x02\x01\x01"]]), $chain];
+        yield 'credential whose critical subject key identifier has a byte after it' => [self::credentialWithExtensions([[SignedCertificate::SUBJECT_KEY_IDENTIFIER, "\x04\x01\x01\x00"]]), $chain];
+        yield 'credential whose subject key identifier, not critical, is a NULL' => [self::credentialWithExtensions([[SignedCertificate::SUBJECT_KEY_IDENTIFIER, $null, false]]), $chain];
+        yield 'credential with its subject key identifier twice' => [self::credentialWithExtensions([[SignedCertificate::SUBJECT_KEY_IDENTIFIER, "\x04\x01\x01", false], [SignedCertificate::SUBJECT_KEY_IDENTIFIER, "\x04\x01\x01", false]]), $chain];
+        yield 'intermediate whose subject key identifier is an INTEGER, the credential naming no authority key' => [
+            static fn(AttestationBuilder $b): AttestationBuilder => self::intermediateExtension(SignedCertificate::SUBJECT_KEY_IDENTIFIER, static fn(): string => "\x02\x01\x01")(
+                $b->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withoutExtension($tbs, SignedCertificate::AUTHORITY_KEY_IDENTIFIER)),
+            ),
+            $chain,
+        ];
+        yield 'intermediate with a critical nonce extension, which the chain processes only for the credential certificate' => [
+            self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, SignedCertificate::extension(SignedCertificate::NONCE, AttestationBuilder::nonceExtensionDer(str_repeat("\x00", 32)), true)]),
+            $chain,
+        ];
         yield 'credential with an extension whose value is a BIT STRING' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x08\x06\x03\x55\x1d\x62\x03\x01\x00"]), $chain];
         yield 'credential with an empty list of extensions' => [self::credentialFields(static fn(array $fields): array => [...array_slice($fields, 0, -1), "\xa3\x02\x30\x00"]), $chain];
         yield 'credential whose extensions tag holds two lists' => [self::credentialFields(static fn(array $fields): array => [
@@ -520,6 +547,15 @@ final class AttestationVerifierTest extends TestCase
             static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withoutExtension($tbs, SignedCertificate::SUBJECT_KEY_IDENTIFIER)),
         ];
         yield 'intermediate with an unknown extension that is not critical' => [self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, SignedCertificate::extension(self::UNKNOWN_EXTENSION, "\x05\x00")])];
+        yield 'intermediate with a nonce extension that is not critical' => [
+            self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, SignedCertificate::extension(SignedCertificate::NONCE, AttestationBuilder::nonceExtensionDer(str_repeat("\x00", 32)))]),
+        ];
+        yield 'credential with a critical key usage of digitalSignature' => [self::credentialWithExtensions([[SignedCertificate::KEY_USAGE, "\x03\x02\x07\x80"]])];
+        yield 'credential with a critical key usage and an empty critical basicConstraints, as Apple\'s has' => [self::credentialWithExtensions([
+            [SignedCertificate::BASIC_CONSTRAINTS, "\x30\x00"],
+            [SignedCertificate::KEY_USAGE, "\x03\x02\x04\xf0"],
+        ])];
+        yield 'credential with a critical subject key identifier' => [self::credentialWithExtensions([[SignedCertificate::SUBJECT_KEY_IDENTIFIER, "\x04\x14" . str_repeat("\x5a", 20)]])];
     }
 
     /**
@@ -1815,6 +1851,19 @@ final class AttestationVerifierTest extends TestCase
     private static function credentialExtensions(Closure $edit): Closure
     {
         return static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensions($tbs, $edit));
+    }
+
+    /**
+     * @param list<array{0: string, 1: string, 2?: bool}> $added each extension's OID and value as DER, critical unless it says otherwise
+     *
+     * @return Closure(AttestationBuilder): AttestationBuilder
+     */
+    private static function credentialWithExtensions(array $added): Closure
+    {
+        return self::credentialExtensions(static fn(array $extensions): array => [
+            ...$extensions,
+            ...array_map(static fn(array $extension): string => SignedCertificate::extension($extension[0], $extension[1], $extension[2] ?? true), $added),
+        ]);
     }
 
     /**

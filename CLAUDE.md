@@ -161,12 +161,20 @@ tests/
   removed, nothing past `decipherOnly`) with `keyCertSign`; an `authorityKeyIdentifier` must name the
   issuer's `subjectKeyIdentifier` when the issuer has one and its serial number when it holds one, as
   `isIssuerOf()` did; the intermediate needs exactly one `basicConstraints`, `SEQUENCE { TRUE, [INTEGER
-  >= 0] }`. A key usage, key identifier or `basicConstraints` extension twice fails. The intermediate and the
-  credential certificate may mark critical only the extensions the chain processes (`basicConstraints`, key
-  usage, the key identifiers, the nonce extension), as RFC 5280 requires; the root, a trust anchor, is not
-  checked for them. Other extensions may come twice. `TrustAnchor::fromPem()`
-  refuses a root that `Certificate::tryParse()` refuses, without `keyCertSign`, or without an EC key: no
-  chain could lead to such a root.
+  >= 0] }`. A key usage, key identifier or `basicConstraints` extension twice fails. Each key identifier of
+  the intermediate and the credential certificate is decoded whether or not a match needs it: an SKI must be
+  a DER OCTET STRING, an AKI a DER AuthorityKeyIdentifier. The credential certificate, an end entity, may
+  hold one key usage, a DER KeyUsage (any bits, at least one set), and one `basicConstraints`, exactly the
+  empty `SEQUENCE` (`cA` FALSE, no path length), critical or not; Apple's credential certificates carry
+  both, critical (`digitalSignature` to `dataEncipherment`, and `30 00`). A certificate may mark critical
+  only the extensions the chain processes for it, as RFC 5280 requires, never one global list: the
+  intermediate `basicConstraints`, key usage and the key identifiers; the credential certificate these and
+  the nonce extension, so a critical nonce extension on the intermediate fails. A newly processed extension
+  must be decoded for that certificate wherever it appears before it joins its list. The root, a trust
+  anchor, is not checked for them (Apple's marks `basicConstraints` critical, which the chain does not read
+  for the root). Other extensions may come twice. `TrustAnchor::fromPem()` refuses a root that
+  `Certificate::tryParse()` refuses, without `keyCertSign`, or without an EC key: no chain could lead to such
+  a root.
 - The nonce extension is decoded by `Internal\NonceExtension` with the same reader, exactly
   `SEQUENCE { [1] { OCTET STRING } }`; no map is registered with phpseclib, so a map the process registered
   for its OID changes nothing. Do not bring back a guard that reads the registered maps. A credential
