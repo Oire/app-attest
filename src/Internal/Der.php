@@ -53,17 +53,6 @@ final class Der
     private const int MAX_UNUSED_BITS = 7;
 
     /**
-     * Whether the bytes are one SEQUENCE with a definite length in its shortest form, nothing after it, and
-     * at most $maxLength bytes in all.
-     *
-     * @psalm-pure
-     */
-    public static function isOneSequence(string $der, int $maxLength = PHP_INT_MAX): bool
-    {
-        return mb_strlen($der, '8bit') <= $maxLength && self::hasTag(self::tryOne($der), self::SEQUENCE);
-    }
-
-    /**
      * The element the bytes are, or null unless they are exactly one element.
      *
      * @psalm-pure

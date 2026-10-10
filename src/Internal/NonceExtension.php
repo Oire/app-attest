@@ -34,8 +34,6 @@ namespace Oire\AppAttest\Internal;
  */
 final class NonceExtension
 {
-    public const string OID = '1.2.840.113635.100.8.2';
-
     /**
      * The OID's content octets, as Certificate::extensionValues() takes it.
      */

@@ -61,7 +61,8 @@ tests/
 - **phpseclib is test-only.** It sits in `require-dev` (phpseclib 4, namespace `phpseclib4\`) for the test
   builders, so consumers install the library without it. `src/` must never import or call it again: under
   `composer install --no-dev` such code would fail, and `RuntimeDependencyTest` refuses any phpseclib name in
-  `src/` outside comments. Never move it back to `require`.
+  `src/` outside comments. CI also installs the Composer archive with `--no-dev` and verifies every genuine
+  vector with `tests/verify-genuine-vectors.php` and only that autoloader. Never move it back to `require`.
 - **No process-wide state decides a result.** Certificates are read with `Internal\Der`, `DerElement` and
   `Certificate`, the library's own strict DER reader, never with a library whose settings are static and
   shared by the whole process, as phpseclib's `ASN1`/`X509` are. Do not fix such a dependency by saving a
@@ -103,8 +104,9 @@ tests/
   failure, never a PHP warning.
 - Malformed certificates are made with `AttestationBuilder::withIntermediateTbsCertificate()` and
   `withCredentialTbsCertificate()`, which edit the `tbsCertificate` (helpers in `SignedCertificate`:
-  `withFields()`, `withExtensions()`, `withExtensionValue()`) and sign it again, so only the structure under
-  test can fail.
+  `withFields()`, `withExtensions()`, `withExtensionValue()`, `withExtensionTwice()`, `withoutExtension()`)
+  and sign it again, so only the structure under test can fail. `Internal\Der`'s type checks have unit tests
+  of their own in `tests/Internal/DerTest.php`.
 - `testNoProcessWideSettingChangesAnOutcome` flips each process-wide phpseclib setting and checks that every
   case (built and genuine chains, malformed and forged ones, `TrustAnchor::fromPem()`) ends as without it.
   A new case or a new phpseclib setting goes there.
@@ -143,7 +145,12 @@ tests/
   booleans other than `0x00`/`0xFF`, integers and OIDs not in their shortest form, bit strings with set
   unused bits, times other than RFC 5280's (UTC, seconds, no fraction; UTCTime years 50 to 99 are 19xx),
   fields out of order or after the extensions, an empty extension list, an Extension of other than two or
-  three fields.
+  three fields, a version other than an explicit v3, a `critical` flag written as FALSE (DER leaves a
+  DEFAULT out), a signature declaring unused bits. It deliberately accepts a GeneralizedTime before 2050
+  (RFC 5280 asks CAs for UTCTime there), ignores extensions it does not read when they are not critical,
+  checks Names and the SubjectPublicKeyInfo only as SEQUENCEs (they are compared as bytes and handed to
+  OpenSSL), and does not verify the root's self-signature (the root is trusted by its pin or by the caller).
+  Changing any of these is a behavior change for test chains and needs a CHANGELOG line.
 - The chain is checked signature first: each issuer's ECDSA signature with `openssl_verify()` over the
   original `tbsCertificate` bytes, the signature BIT STRING declaring no unused bits, the outer
   `signatureAlgorithm` equal byte for byte to the signed one and ecdsa-with-SHA256/384/512 without
@@ -154,7 +161,10 @@ tests/
   removed, nothing past `decipherOnly`) with `keyCertSign`; an `authorityKeyIdentifier` must name the
   issuer's `subjectKeyIdentifier` when the issuer has one and its serial number when it holds one, as
   `isIssuerOf()` did; the intermediate needs exactly one `basicConstraints`, `SEQUENCE { TRUE, [INTEGER
-  >= 0] }`. A key usage, key identifier or `basicConstraints` extension twice fails. `TrustAnchor::fromPem()`
+  >= 0] }`. A key usage, key identifier or `basicConstraints` extension twice fails. The intermediate and the
+  credential certificate may mark critical only the extensions the chain processes (`basicConstraints`, key
+  usage, the key identifiers, the nonce extension), as RFC 5280 requires; the root, a trust anchor, is not
+  checked for them. Other extensions may come twice. `TrustAnchor::fromPem()`
   refuses a root that `Certificate::tryParse()` refuses, without `keyCertSign`, or without an EC key: no
   chain could lead to such a root.
 - The nonce extension is decoded by `Internal\NonceExtension` with the same reader, exactly
@@ -169,10 +179,13 @@ tests/
   output settings; `PKCS::$format`, `AsymmetricKey` plugins, config path and `forceEngine()` per key class,
   EC curve settings, RSA blinding and salt settings, `BigInteger::setEngine()`. phpseclib is not even a
   runtime dependency any more, so none changes a result; the tests still run with it installed.
-  `testNoProcessWideSettingChangesAnOutcome` flips 17 of them; the CRL and URL callbacks have tests of their
-  own. cbor-php keeps no static state.
+  `testNoProcessWideSettingChangesAnOutcome` flips 17 of them; the CRL and URL callbacks need no test, since
+  nothing in `src/` can reach them. cbor-php keeps no static state.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
-  previous handler. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
+  previous handler. Besides cbor-php, it runs the chain checks, for any warning OpenSSL's key and signature
+  calls might raise on hostile input; keep it although phpseclib is gone. `CertificateChain` catches only its
+  `ErrorException`, so an internal `LogicException` from `Der` surfaces instead of passing for a refused
+  chain. It must not obey a lowered `error_reporting()`: PHPUnit lowers it for every test while
   its own handler still reports warnings, so such a guard would be off in the whole suite.
 - The CBOR decoder keeps only strings, unsigned integers, lists and maps, so an integer or a tag where a
   byte string belongs is `Format`. Byte strings decode to strings and text strings to `Internal\CborText`,

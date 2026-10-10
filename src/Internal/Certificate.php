@@ -26,8 +26,11 @@ use DateTimeZone;
 
 /**
  * An X.509 certificate taken apart by the library's own DER reader: the parts the chain checks read, each as
- * the bytes the certificate holds. Every structure on the way is checked as DER and as RFC 5280 lays it out,
- * so a certificate decodes to the same parts, or fails, whatever any ASN.1 parser of the process is set to.
+ * the bytes the certificate holds. Every structure it reads is checked as DER and in RFC 5280's layout, so a
+ * certificate decodes to the same parts, or fails, whatever any ASN.1 parser of the process is set to. It must
+ * be a v3 certificate, its signature must declare no unused bits, and an extension's critical flag, when
+ * present, must be TRUE, since DER leaves out a DEFAULT value. Names and the SubjectPublicKeyInfo are checked
+ * only as SEQUENCEs, and a GeneralizedTime is accepted for any year.
  *
  * @internal
  *
@@ -36,21 +39,23 @@ use DateTimeZone;
 final readonly class Certificate
 {
     private const int VERSION_TAG = 0xA0;
+    private const string V3 = "\x02\x01\x02";
+    private const string NO_UNUSED_BITS = "\x00";
     private const int ISSUER_UNIQUE_ID_TAG = 0x81;
     private const int SUBJECT_UNIQUE_ID_TAG = 0x82;
     private const int EXTENSIONS_TAG = 0xA3;
     private const int CENTURY_PIVOT = 50;
 
     /**
-     * @param string                      $tbsCertificate       the signed part, as DER
-     * @param string                      $signedAlgorithm      the signature AlgorithmIdentifier inside tbsCertificate, as DER
-     * @param string                      $signatureAlgorithm   the signatureAlgorithm after tbsCertificate, as DER
-     * @param string                      $signature            the signature BIT STRING's content, its unused-bits octet first
-     * @param string                      $serialNumber         the serialNumber INTEGER's content
-     * @param string                      $issuer               the issuer Name, as DER
-     * @param string                      $subject              the subject Name, as DER
-     * @param string                      $subjectPublicKeyInfo as DER
-     * @param list<array{string, string}> $extensions           each extension's OBJECT IDENTIFIER content and value
+     * @param string                            $tbsCertificate       the signed part, as DER
+     * @param string                            $signedAlgorithm      the signature AlgorithmIdentifier inside tbsCertificate, as DER
+     * @param string                            $signatureAlgorithm   the signatureAlgorithm after tbsCertificate, as DER
+     * @param string                            $signature            the signature BIT STRING's bits
+     * @param string                            $serialNumber         the serialNumber INTEGER's content
+     * @param string                            $issuer               the issuer Name, as DER
+     * @param string                            $subject              the subject Name, as DER
+     * @param string                            $subjectPublicKeyInfo as DER
+     * @param list<array{string, bool, string}> $extensions           each extension's OBJECT IDENTIFIER content, critical flag and value
      *
      * @psalm-pure
      */
@@ -82,16 +87,19 @@ final readonly class Certificate
         [$tbsCertificate, $signatureAlgorithm, $signature] = $parts;
         $fields = $tbsCertificate->children(Der::SEQUENCE);
 
-        if ($fields === null || $signatureAlgorithm->tag !== Der::SEQUENCE || $signature->tag !== Der::BIT_STRING) {
+        if (
+            $fields === null
+            || $signatureAlgorithm->tag !== Der::SEQUENCE
+            || $signature->tag !== Der::BIT_STRING
+            || mb_substr($signature->content, 0, 1, '8bit') !== self::NO_UNUSED_BITS
+        ) {
             return null;
         }
 
-        if (Der::hasTag($fields[0] ?? null, self::VERSION_TAG)) {
-            $version = array_shift($fields)?->children(self::VERSION_TAG) ?? [];
+        $version = Der::hasTag($fields[0] ?? null, self::VERSION_TAG) ? array_shift($fields)?->children(self::VERSION_TAG) ?? [] : [];
 
-            if (count($version) !== 1 || !Der::isInteger($version[0] ?? null)) {
-                return null;
-            }
+        if (count($version) !== 1 || ($version[0] ?? null)?->encoded !== self::V3) {
+            return null;
         }
 
         $serialNumber = array_shift($fields);
@@ -138,7 +146,7 @@ final readonly class Certificate
             $tbsCertificate->encoded,
             $signedAlgorithm->encoded,
             $signatureAlgorithm->encoded,
-            $signature->content,
+            mb_substr($signature->content, 1, null, '8bit'),
             $serialNumber->content,
             $issuer->encoded,
             $notBefore,
@@ -160,7 +168,7 @@ final readonly class Certificate
     {
         $values = [];
 
-        foreach ($this->extensions as [$id, $value]) {
+        foreach ($this->extensions as [$id, , $value]) {
             if ($id === $objectIdentifier) {
                 $values[] = $value;
             }
@@ -170,10 +178,30 @@ final readonly class Certificate
     }
 
     /**
+     * The OBJECT IDENTIFIER, given as its content octets, of every extension marked critical.
+     *
+     * @return list<string>
+     *
+     * @psalm-capabilities read-props
+     */
+    public function criticalExtensionIdentifiers(): array
+    {
+        $identifiers = [];
+
+        foreach ($this->extensions as [$id, $critical]) {
+            if ($critical) {
+                $identifiers[] = $id;
+            }
+        }
+
+        return $identifiers;
+    }
+
+    /**
      * Extensions ::= SEQUENCE SIZE (1..MAX) OF SEQUENCE { extnID OBJECT IDENTIFIER, critical BOOLEAN DEFAULT
      * FALSE, extnValue OCTET STRING }, inside the explicit [3] tag.
      *
-     * @return ?list<array{string, string}>
+     * @return ?list<array{string, bool, string}>
      *
      * @psalm-pure
      */
@@ -194,11 +222,11 @@ final readonly class Certificate
             $value = array_pop($fields);
             $critical = array_pop($fields);
 
-            if ($fields !== [] || !Der::isObjectIdentifier($id) || !Der::hasTag($value, Der::OCTET_STRING) || ($critical !== null && !Der::isBoolean($critical))) {
+            if ($fields !== [] || !Der::isObjectIdentifier($id) || !Der::hasTag($value, Der::OCTET_STRING) || ($critical !== null && !Der::isTrue($critical))) {
                 return null;
             }
 
-            $extensions[] = [$id->content, $value->content];
+            $extensions[] = [$id->content, $critical !== null, $value->content];
         }
 
         return $extensions;

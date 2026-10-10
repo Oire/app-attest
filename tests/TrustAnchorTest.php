@@ -78,6 +78,7 @@ final class TrustAnchorTest extends TestCase
     public function testFromPemRefusesAnythingButOneCertificate(string $pem): void
     {
         $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The trust anchor must be exactly one PEM-encoded X.509 certificate.');
         TrustAnchor::fromPem($pem);
     }
 
@@ -111,7 +112,10 @@ final class TrustAnchorTest extends TestCase
     {
         yield 'an RSA root' => [static fn(): string => self::selfSignedRoot(RsaKey::generate())];
         yield 'an Ed25519 root' => [static fn(): string => self::selfSignedRoot(EC::createKey('Ed25519'))];
-        yield 'an EC root without key usage' => [static fn(): string => AttestationBuilder::create()->withRootWithoutKeyUsage()->build()->rootPem];
+        yield 'an EC root without key usage' => [static fn(): string => AttestationBuilder::create()
+            ->withRootWithoutKeyUsage()
+            ->build()
+            ->rootPem];
         yield 'an EC root whose key usage lacks keyCertSign' => [static fn(): string => self::selfSignedRoot(EC::createKey('secp256r1')->withHash('sha256'), ['digitalSignature', 'cRLSign'])];
     }
 
@@ -126,6 +130,7 @@ final class TrustAnchorTest extends TestCase
         self::assertNotFalse(openssl_x509_read($pem));
 
         $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The trust anchor must hold an EC key, not an Ed25519 or Ed448 one, and a key usage extension that includes keyCertSign.');
         TrustAnchor::fromPem($pem);
     }
 

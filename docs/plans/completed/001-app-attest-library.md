@@ -324,11 +324,11 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
       loads. Task 4's verifier must register the identical map (move `AttestationBuilder::NONCE_EXTENSION_MAP`
       to `src/Internal/` and point the builder at it), or it would see a decoded array in tests and a raw
       string in production (plan execution, 2026-10-09)
-      ⚠️ Superseded by the phpseclib 4 migration: `CertificateChain` no longer calls
-      `validateSignature()`, `disableURLFetch()`, `loadCA()` or `registerExtension()`, which phpseclib 4
-      removed or made process-wide; it verifies each signature itself and decodes the nonce extension
-      without a registered map, and the builder registers none either. See CLAUDE.md's phpseclib 4
-      entries (phpseclib 4 migration, 2026-10-09)
+      ⚠️ Superseded in 2.0: `src/` no longer uses phpseclib, which is a development dependency only.
+      `Internal\Der`, `DerElement` and `Certificate` read each certificate, and `Internal\NonceExtension`
+      decodes the nonce extension with the same reader, so no map is registered anywhere. See CLAUDE.md's
+      "No process-wide state decides a result" and nonce extension entries (phpseclib 4 migration,
+      2026-10-09; updated 2026-10-10)
 - [x] `AssertionBuilder` (test code) generates a P-256 key and signs `authenticatorData ‖
       SHA-256(clientData)` for any `rpIdHash`, counter and `clientData`, CBOR-encoding
       `{signature, authenticatorData}` — the same recipe consumers use for their own tests
@@ -376,10 +376,13 @@ objects in `Value/`; exceptions and their reason enums in `Exception/`; implemen
          also calls `X509::disableURLFetch()`, since phpseclib would otherwise fetch `caIssuers` URLs.
          phpseclib warns on malformed DER, so all its parsing runs under `ErrorGuard` (plan execution,
          2026-10-09)
-         ⚠️ Superseded by the phpseclib 4 migration: `CertificateChain` no longer calls
-         `validateSignature()`, `disableURLFetch()` or `loadCA()`; it checks each issuer's ECDSA signature
-         with OpenSSL before phpseclib parses the certificate, then `isIssuerOf()`, the validity periods
-         and the `cA` flag. See CLAUDE.md's phpseclib 4 entries (phpseclib 4 migration, 2026-10-09)
+         ⚠️ Superseded in 2.0: `src/` calls no phpseclib. `Internal\Der`, `DerElement` and `Certificate`
+         read each certificate strictly; `CertificateChain` verifies each issuer's ECDSA signature with
+         OpenSSL over the original `tbsCertificate`, then checks the issuer Name byte for byte, the
+         issuer's `keyCertSign`, the key identifiers, critical extensions, the validity periods and the
+         `cA` flag itself. No URL is fetched because nothing could fetch one. See CLAUDE.md's "No
+         process-wide state decides a result" and chain-check entries (phpseclib 4 migration, 2026-10-09;
+         updated 2026-10-10)
       3. nonce = SHA-256(`authData` ‖ `clientDataHash`) must equal (`hash_equals`) the 32-byte octet
          string inside the credential certificate's extension `1.2.840.113635.100.8.2`, read through
          its ASN.1 layout (Context); an absent or malformed extension is `Nonce`;

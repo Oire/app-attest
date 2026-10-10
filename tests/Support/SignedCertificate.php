@@ -6,11 +6,6 @@ namespace Oire\AppAttest\Tests\Support;
 
 use Closure;
 use phpseclib4\Crypt\Common\PrivateKey;
-use phpseclib4\File\ASN1;
-use phpseclib4\File\ASN1\Constructed;
-use phpseclib4\File\ASN1\Maps\Certificate;
-use phpseclib4\File\ASN1\Maps\TBSCertificate;
-use phpseclib4\File\ASN1\Types\BitString;
 use RuntimeException;
 
 /**
@@ -44,38 +39,46 @@ final class SignedCertificate
     public const string SUBJECT_KEY_IDENTIFIER = "\x06\x03\x55\x1d\x0e";
     public const string AUTHORITY_KEY_IDENTIFIER = "\x06\x03\x55\x1d\x23";
     public const string NONCE = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
+    public const string KEY_USAGE_OID = '2.5.29.15';
+    public const string SUBJECT_KEY_IDENTIFIER_OID = '2.5.29.14';
+    public const string AUTHORITY_KEY_IDENTIFIER_OID = '2.5.29.35';
+    public const string BASIC_CONSTRAINTS_OID = '2.5.29.19';
+    public const string NONCE_OID = '1.2.840.113635.100.8.2';
+
+    /**
+     * The index of the signature AlgorithmIdentifier among a v3 tbsCertificate's fields.
+     */
+    public const int SIGNED_ALGORITHM_FIELD = 2;
     private const string EXTENSIONS_TAG = "\xa3";
+    private const int CERTIFICATE_PARTS = 3;
 
     /**
      * @return array{string, string, string} the tbsCertificate, the signatureAlgorithm and the content of the
      *                                       signature BIT STRING, its unused-bits octet first, all as DER
+     *
+     * @psalm-pure
      */
     public static function split(string $der): array
     {
-        $certificate = ASN1::map(ASN1::decodeBER($der), Certificate::MAP);
+        $parts = self::elements(self::content($der));
 
-        if (!$certificate instanceof Constructed) {
-            throw new RuntimeException('The bytes are not a certificate.');
-        }
-
-        $tbsCertificate = $certificate['tbsCertificate'];
-        $algorithm = $certificate['signatureAlgorithm'];
-        $signature = $certificate['signature'];
-
-        if (!$tbsCertificate instanceof Constructed || !$algorithm instanceof Constructed || !$signature instanceof BitString) {
+        if (count($parts) !== self::CERTIFICATE_PARTS || !isset($parts[0], $parts[1], $parts[2])) {
             throw new RuntimeException('The certificate does not have the three parts of one.');
         }
 
-        return [$tbsCertificate->getEncoded(), $algorithm->getEncoded(), $signature->value];
+        return [$parts[0], $parts[1], self::content($parts[2])];
     }
 
+    /**
+     * @psalm-pure
+     */
     public static function join(string $tbsCertificate, string $algorithm, string $bitStringContent): string
     {
         return self::encoded("\x30", $tbsCertificate . $algorithm . self::encoded("\x03", $bitStringContent));
     }
 
     /**
-     * The certificate with its tbsCertificate signed by the key, labelled with this signatureAlgorithm.
+     * The certificate with its tbsCertificate signed by the key, labeled with this signatureAlgorithm.
      */
     public static function signed(string $tbsCertificate, string $algorithm, PrivateKey $key): string
     {
@@ -89,38 +92,25 @@ final class SignedCertificate
     }
 
     /**
-     * The signature AlgorithmIdentifier inside the tbsCertificate, as DER.
+     * The element with this identifier octet and content, its length in the shortest form.
+     *
+     * @psalm-pure
      */
-    public static function signedAlgorithm(string $tbsCertificate): string
-    {
-        $algorithm = self::mappedTbsCertificate($tbsCertificate)['signature'];
-
-        if (!$algorithm instanceof Constructed) {
-            throw new RuntimeException('The tbsCertificate has no signature AlgorithmIdentifier.');
-        }
-
-        return $algorithm->getEncoded();
-    }
-
-    /**
-     * The tbsCertificate with another signature AlgorithmIdentifier inside it.
-     */
-    public static function withSignedAlgorithm(string $tbsCertificate, string $algorithm): string
-    {
-        $signed = self::signedAlgorithm($tbsCertificate);
-        $content = self::mappedTbsCertificate($tbsCertificate)->getEncodedWithoutHeader();
-        $offset = mb_strpos($content, $signed, 0, '8bit');
-
-        if ($offset === false) {
-            throw new RuntimeException('The signature AlgorithmIdentifier is not in the tbsCertificate.');
-        }
-
-        return self::encoded("\x30", mb_substr($content, 0, $offset, '8bit') . $algorithm . mb_substr($content, $offset + mb_strlen($signed, '8bit'), null, '8bit'));
-    }
-
     public static function encoded(string $tag, string $content): string
     {
-        return $tag . ASN1::encodeLength(mb_strlen($content, '8bit')) . $content;
+        $length = mb_strlen($content, '8bit');
+
+        if ($length < 0x80) {
+            return $tag . chr($length) . $content;
+        }
+
+        $lengthBytes = '';
+
+        for ($rest = $length; $rest > 0; $rest >>= 8) {
+            $lengthBytes = chr($rest & 0xFF) . $lengthBytes;
+        }
+
+        return $tag . chr(0x80 | mb_strlen($lengthBytes, '8bit')) . $lengthBytes . $content;
     }
 
     /**
@@ -220,21 +210,52 @@ final class SignedCertificate
     }
 
     /**
-     * An Extension, not critical, with this OID (DER) and value (DER).
+     * The tbsCertificate with its extension with this OID twice: right before it, a copy, or an extension with
+     * the same OID and this value (DER).
+     *
+     * @param string $oid the OBJECT IDENTIFIER as DER
      */
-    public static function extension(string $oid, string $value): string
+    public static function withExtensionTwice(string $tbsCertificate, string $oid, ?string $earlierValue = null): string
     {
-        return self::encoded("\x30", $oid . self::encoded("\x04", $value));
+        return self::withExtensions($tbsCertificate, static function(array $extensions) use ($oid, $earlierValue): array {
+            $repeated = [];
+
+            foreach ($extensions as $extension) {
+                if ((self::elements(self::content($extension))[0] ?? null) === $oid) {
+                    $repeated[] = $earlierValue === null ? $extension : self::extension($oid, $earlierValue);
+                }
+
+                $repeated[] = $extension;
+            }
+
+            if (count($repeated) === count($extensions)) {
+                throw new RuntimeException('The tbsCertificate has no extension with this OID.');
+            }
+
+            return $repeated;
+        });
     }
 
-    private static function mappedTbsCertificate(string $tbsCertificate): Constructed
+    /**
+     * The tbsCertificate without its extensions with this OID.
+     *
+     * @param string $oid the OBJECT IDENTIFIER as DER
+     */
+    public static function withoutExtension(string $tbsCertificate, string $oid): string
     {
-        $mapped = ASN1::map(ASN1::decodeBER($tbsCertificate), TBSCertificate::MAP);
+        return self::withExtensions($tbsCertificate, static fn(array $extensions): array => array_values(array_filter(
+            $extensions,
+            static fn(string $extension): bool => (self::elements(self::content($extension))[0] ?? null) !== $oid,
+        )));
+    }
 
-        if (!$mapped instanceof Constructed) {
-            throw new RuntimeException('The bytes are not a tbsCertificate.');
-        }
-
-        return $mapped;
+    /**
+     * An Extension with this OID (DER) and value (DER), not critical unless it says so.
+     *
+     * @psalm-pure
+     */
+    public static function extension(string $oid, string $value, bool $critical = false): string
+    {
+        return self::encoded("\x30", $oid . ($critical ? "\x01\x01\xff" : '') . self::encoded("\x04", $value));
     }
 }

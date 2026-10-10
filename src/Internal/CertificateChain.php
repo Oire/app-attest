@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Oire\AppAttest\Internal;
 
 use DateTimeInterface;
+use ErrorException;
 use Oire\AppAttest\TrustAnchor;
 use OpenSSLAsymmetricKey;
-use Throwable;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -36,10 +36,14 @@ use Throwable;
  * another component could change, so no setting of any library changes what a certificate decodes to or
  * whether a chain passes. Each link is checked signature first: the issuer's ECDSA signature over the
  * original tbsCertificate bytes, then the issuer Name, key usage and key identifiers, the validity period and
- * the intermediate's basicConstraints. Verification makes no network call.
+ * the intermediate's basicConstraints. The intermediate and the credential certificate may carry no critical
+ * extension the chain does not process, as RFC 5280 requires. Verification makes no network call.
  *
  * Every certificate must be DER, and an x5c entry at most MAX_LENGTH bytes, so its bytes cannot be altered
  * and still pass, ECDSA's own choice of s or n - s aside.
+ *
+ * The checks run under ErrorGuard, which turns a warning OpenSSL might raise on hostile input into a refused
+ * chain; any other exception, such as Der's LogicException for a broken invariant, is not caught.
  *
  * @internal
  */
@@ -47,7 +51,6 @@ final readonly class CertificateChain
 {
     private const int LENGTH = 2;
     private const int MAX_LENGTH = 4096;
-    private const string NO_UNUSED_BITS = "\x00";
     private const string BASIC_CONSTRAINTS = "\x55\x1d\x13";
     private const string KEY_USAGE = "\x55\x1d\x0f";
     private const string SUBJECT_KEY_IDENTIFIER = "\x55\x1d\x0e";
@@ -57,6 +60,17 @@ final readonly class CertificateChain
     private const int KEY_IDENTIFIER_TAG = 0x80;
     private const int AUTHORITY_CERT_ISSUER_TAG = 0xA1;
     private const int AUTHORITY_CERT_SERIAL_NUMBER_TAG = 0x82;
+
+    /**
+     * The extensions the chain processes, the only ones a certificate it checks may mark critical.
+     */
+    private const array PROCESSED_EXTENSIONS = [
+        self::BASIC_CONSTRAINTS,
+        self::KEY_USAGE,
+        self::SUBJECT_KEY_IDENTIFIER,
+        self::AUTHORITY_KEY_IDENTIFIER,
+        NonceExtension::OBJECT_IDENTIFIER,
+    ];
 
     /**
      * Hashes by the DER AlgorithmIdentifier of ecdsa-with-SHA256, -SHA384 and -SHA512, with the parameters
@@ -91,7 +105,7 @@ final readonly class CertificateChain
         $intermediateDer = $certificates[1];
         $rootDer = Pem::tryDecode($anchor->pem, Pem::CERTIFICATE);
 
-        if ($rootDer === null || !Der::isOneSequence($intermediateDer, self::MAX_LENGTH) || !Der::isOneSequence($credentialDer, self::MAX_LENGTH)) {
+        if ($rootDer === null || mb_strlen($intermediateDer, '8bit') > self::MAX_LENGTH || mb_strlen($credentialDer, '8bit') > self::MAX_LENGTH) {
             return null;
         }
 
@@ -110,7 +124,9 @@ final readonly class CertificateChain
                 }
 
                 if (
-                    !self::isValidAt($root, $time)
+                    !self::hasOnlyProcessedCriticalExtensions($intermediate)
+                    || !self::hasOnlyProcessedCriticalExtensions($credential)
+                    || !self::isValidAt($root, $time)
                     || !self::isValidAt($intermediate, $time)
                     || !self::isValidAt($credential, $time)
                     || !self::isIssuerOf($root, $intermediate)
@@ -122,24 +138,20 @@ final readonly class CertificateChain
 
                 return new self(self::nonceIn($credential), $credential->subjectPublicKeyInfo);
             });
-        } catch (Throwable) {
+        } catch (ErrorException) {
             return null;
         }
     }
 
     /**
-     * Whether the bytes are a certificate that can anchor a chain: it holds an EC key other than an Edwards
-     * one, and its key usage includes keyCertSign, which the chain requires of every issuer.
+     * Whether the certificate can anchor a chain: it holds an EC key other than an Edwards one, and its key
+     * usage includes keyCertSign, which the chain requires of every issuer.
      */
-    public static function canAnchor(string $rootDer): bool
+    public static function canAnchor(Certificate $root): bool
     {
         try {
-            return ErrorGuard::call(static function() use ($rootDer): bool {
-                $root = Certificate::tryParse($rootDer);
-
-                return $root !== null && self::ecKeyOf($root) !== null && self::canSignCertificates($root);
-            });
-        } catch (Throwable) {
+            return ErrorGuard::call(static fn(): bool => self::ecKeyOf($root) !== null && self::canSignCertificates($root));
+        } catch (ErrorException) {
             return false;
         }
     }
@@ -159,8 +171,15 @@ final readonly class CertificateChain
         return $hash !== null
             && $key !== null
             && $certificate->signedAlgorithm === $certificate->signatureAlgorithm
-            && mb_substr($certificate->signature, 0, 1, '8bit') === self::NO_UNUSED_BITS
-            && openssl_verify($certificate->tbsCertificate, mb_substr($certificate->signature, 1, null, '8bit'), $key, $hash) === 1;
+            && openssl_verify($certificate->tbsCertificate, $certificate->signature, $key, $hash) === 1;
+    }
+
+    /**
+     * @psalm-capabilities read-props
+     */
+    private static function hasOnlyProcessedCriticalExtensions(Certificate $certificate): bool
+    {
+        return array_diff($certificate->criticalExtensionIdentifiers(), self::PROCESSED_EXTENSIONS) === [];
     }
 
     /**
@@ -196,7 +215,7 @@ final readonly class CertificateChain
      */
     private static function isIssuerOf(Certificate $issuer, Certificate $certificate): bool
     {
-        return $issuer->subject === $certificate->issuer
+        return hash_equals($issuer->subject, $certificate->issuer)
             && self::canSignCertificates($issuer)
             && self::keyIdentifiersMatch($issuer, $certificate);
     }
@@ -245,7 +264,7 @@ final readonly class CertificateChain
 
         [$keyIdentifier, $serialNumber] = $authority;
 
-        if ($serialNumber !== null && $serialNumber !== $issuer->serialNumber) {
+        if ($serialNumber !== null && !hash_equals($issuer->serialNumber, $serialNumber)) {
             return false;
         }
 

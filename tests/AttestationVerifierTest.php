@@ -24,7 +24,6 @@ use InvalidArgumentException;
 use Oire\AppAttest\AttestationVerifier;
 use Oire\AppAttest\Exception\AttestationException;
 use Oire\AppAttest\Exception\AttestationFailureReason;
-use Oire\AppAttest\Internal\NonceExtension;
 use Oire\AppAttest\Tests\Support\AttestationBuilder;
 use Oire\AppAttest\Tests\Support\AttestationVector;
 use Oire\AppAttest\Tests\Support\BuiltAttestation;
@@ -46,7 +45,6 @@ use Oire\AppAttest\Value\Environment;
 use Oire\AppAttest\Value\LaunchPolicy;
 use Oire\AppAttest\Value\TeamId;
 use Oire\AppAttest\Value\ValidationCategory;
-use Override;
 use phpseclib4\Crypt\Common\Formats\Keys\PKCS;
 use phpseclib4\Crypt\EC;
 use phpseclib4\File\ASN1;
@@ -86,12 +84,20 @@ final class AttestationVerifierTest extends TestCase
     private const int MAX_LENGTH = 16384;
     private const int HOSTILE_ITEMS = 600_000;
     private const int NESTED_SEQUENCES_LENGTH = 14000;
+    private const int MAX_CERTIFICATE_LENGTH = 4096;
+    private const int LENGTH_ATTEMPTS = 20;
 
     /**
      * The validity's index among a built certificate's tbsCertificate fields, after the version, the serial
      * number, the signature algorithm and the issuer.
      */
     private const int VALIDITY_FIELD = 4;
+
+    /**
+     * 2.5.29.98, an extension OID no certificate the chain checks uses.
+     */
+    private const string UNKNOWN_EXTENSION = "\x06\x03\x55\x1d\x62";
+    private const string SERIAL_NUMBER = "\x01\x02\x03\x04\x05\x06\x07\x08";
 
     /**
      * @var ?array<string, array{string, Closure(): string}>
@@ -106,12 +112,6 @@ final class AttestationVerifierTest extends TestCase
         foreach (Fixtures::attestations() as $name => $vector) {
             yield $name => [$vector];
         }
-    }
-
-    #[Override]
-    protected function tearDown(): void
-    {
-        X509::setURLFetchCallback(static fn(): bool => false);
     }
 
     #[DataProvider('provideGenuineVectors')]
@@ -331,243 +331,6 @@ final class AttestationVerifierTest extends TestCase
         self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
     }
 
-    public function testCaIssuersUrlIsNeverFetched(): void
-    {
-        $attestation = AttestationBuilder::create()
-            ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
-            ->build();
-        $fetched = [];
-        X509::setURLFetchCallback(static function(string $host) use (&$fetched): bool {
-            $fetched[] = $host;
-
-            return false;
-        });
-
-        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
-        self::assertSame([], $fetched);
-    }
-
-    /**
-     * @return iterable<string, array{?string}>
-     *
-     * @psalm-capabilities read-props
-     */
-    public static function provideNonceMapNames(): iterable
-    {
-        yield 'under its OID' => [null];
-        yield 'under a name given with ASN1::loadOIDs()' => ['oireAppAttestNonce'];
-    }
-
-    #[DataProvider('provideNonceMapNames')]
-    public function testNonceMapRegisteredByTheProcessChangesNothing(?string $name): void
-    {
-        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
-        $oids = new ReflectionProperty(ASN1::class, 'oids');
-        $reverseOids = new ReflectionProperty(ASN1::class, 'reverseOIDs');
-        $extensions = new ReflectionProperty(X509::class, 'extensions');
-        $savedOids = (array) $oids->getValue();
-        $savedReverseOids = (array) $reverseOids->getValue();
-        $registered = (array) $extensions->getValue();
-
-        try {
-            if ($name !== null) {
-                ASN1::loadOIDs([$name => NonceExtension::OID]);
-            }
-
-            X509::registerExtension($name ?? NonceExtension::OID, ['type' => ASN1::TYPE_OCTET_STRING]);
-            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
-            self::assertFailure(AttestationFailureReason::Nonce, static fn() => self::verifyVector($vector, clientDataHash: hash('sha256', 'another challenge', true)));
-        } finally {
-            $extensions->setValue(null, $registered);
-            $oids->setValue(null, $savedOids);
-            $reverseOids->setValue(null, $savedReverseOids);
-        }
-    }
-
-    public function testSignatureAlgorithmIsMatchedWhateverNameTheProcessGivesIt(): void
-    {
-        $attestation = AttestationBuilder::create()->build();
-        $oids = new ReflectionProperty(ASN1::class, 'oids');
-        $reverseOids = new ReflectionProperty(ASN1::class, 'reverseOIDs');
-        $savedOids = (array) $oids->getValue();
-        $savedReverseOids = (array) $reverseOids->getValue();
-
-        try {
-            ASN1::loadOIDs(['oireEcdsaWithSha256' => '1.2.840.10045.4.3.2']);
-            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
-        } finally {
-            $oids->setValue(null, $savedOids);
-            $reverseOids->setValue(null, $savedReverseOids);
-        }
-    }
-
-    public function testCaStoreOfTheProcessIsNeverTrusted(): void
-    {
-        $victim = AttestationBuilder::create()->build();
-        $attacker = AttestationBuilder::create()->build();
-        self::assertSame([], X509::getCAs());
-        X509::addCA($attacker->rootPem);
-
-        try {
-            self::assertFailure(
-                AttestationFailureReason::CertificateChain,
-                static fn() => (new AttestationVerifier($victim->trustAnchor(), $attacker->clock()))->verify(
-                    $attacker->cbor,
-                    $attacker->clientDataHash,
-                    $attacker->keyId,
-                    $attacker->app,
-                    [Environment::Development],
-                ),
-            );
-        } finally {
-            X509::clearCAStore();
-        }
-    }
-
-    public function testValidationDateOfTheProcessNeverSwitchesTheDateCheckOff(): void
-    {
-        $attestation = AttestationBuilder::create()
-            ->withExpiredRoot()
-            ->build();
-        $date = X509::getTargetValidationDate();
-        X509::setTargetValidationDate(null);
-
-        try {
-            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
-        } finally {
-            X509::setTargetValidationDate($date);
-        }
-    }
-
-    public function testCrlLookupCallbackIsNeverCalled(): void
-    {
-        $attestation = AttestationBuilder::create()->build();
-        $lookups = [];
-        X509::setCRLLookupCallback(static function(string $url) use (&$lookups): bool {
-            $lookups[] = $url;
-
-            return false;
-        });
-
-        try {
-            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
-            self::assertSame([], $lookups);
-        } finally {
-            X509::setCRLLookupCallback(static fn(): bool => false);
-        }
-    }
-
-    /**
-     * phpseclib's isIssuerOf() reads these X509 properties, which the switches set for the whole process.
-     *
-     * @return iterable<string, array{string, Closure(): void, Closure(AttestationBuilder): AttestationBuilder}>
-     */
-    public static function provideIssuerFailuresUnderProcessWideSwitches(): iterable
-    {
-        $switches = [
-            'ignoreKeyUsage' => ['checkKeyUsage', X509::ignoreKeyUsage(...)],
-            'looseDNComparison' => ['strictDNComparison', X509::looseDNComparison(...)],
-            'ignoreBasicConstraints' => ['checkBasicConstraints', X509::ignoreBasicConstraints(...)],
-        ];
-        $variants = [
-            'intermediate without keyCertSign' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKeyUsage(['digitalSignature', 'cRLSign']),
-            'intermediate naming the root in capitals' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateIssuerName('OIRE TEST APP ATTESTATION ROOT CA'),
-            'credential naming the intermediate with doubled spaces' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialIssuerName('Oire  Test  App  Attestation  CA'),
-            'credential naming another issuer' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialIssuerName('Oire Test Other CA'),
-            'intermediate that is not a CA' => static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateNotCa(),
-        ];
-
-        foreach ($switches as $switch => [$property, $turnOn]) {
-            foreach ($variants as $name => $variant) {
-                yield $switch . ', ' . $name => [$property, $turnOn, $variant];
-            }
-        }
-    }
-
-    /**
-     * @param Closure(): void                                 $turnOn
-     * @param Closure(AttestationBuilder): AttestationBuilder $variant
-     */
-    #[DataProvider('provideIssuerFailuresUnderProcessWideSwitches')]
-    public function testProcessWideSwitchNeverLoosensTheIssuerChecks(string $property, Closure $turnOn, Closure $variant): void
-    {
-        $attestation = $variant(AttestationBuilder::create())->build();
-        $setting = new ReflectionProperty(X509::class, $property);
-        $saved = (bool) $setting->getValue();
-        $turnOn();
-
-        try {
-            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
-        } finally {
-            $setting->setValue(null, $saved);
-        }
-    }
-
-    public function testValidChainIsAcceptedWhateverTheProcessWideSwitches(): void
-    {
-        $attestation = AttestationBuilder::create()->build();
-        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
-        $settings = [];
-        $saved = [];
-
-        foreach (['checkKeyUsage', 'strictDNComparison', 'checkBasicConstraints'] as $property) {
-            $settings[$property] = new ReflectionProperty(X509::class, $property);
-            $saved[$property] = (bool) $settings[$property]->getValue();
-            $settings[$property]->setValue(null, !$saved[$property]);
-        }
-
-        try {
-            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
-            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
-        } finally {
-            foreach ($settings as $property => $setting) {
-                $setting->setValue(null, $saved[$property]);
-            }
-        }
-    }
-
-    public function testIssuerExtensionsAndNamesAreMatchedWhateverNamesTheProcessGivesTheirOids(): void
-    {
-        $attestation = AttestationBuilder::create()->build();
-        $vector = Fixtures::attestation(self::GUIDE_VECTOR);
-        $oids = new ReflectionProperty(ASN1::class, 'oids');
-        $reverseOids = new ReflectionProperty(ASN1::class, 'reverseOIDs');
-        $savedOids = (array) $oids->getValue();
-        $savedReverseOids = (array) $reverseOids->getValue();
-
-        try {
-            ASN1::loadOIDs([
-                'oireKeyUsage' => '2.5.29.15',
-                'oireSubjectKeyIdentifier' => '2.5.29.14',
-                'oireAuthorityKeyIdentifier' => '2.5.29.35',
-                'oireBasicConstraints' => '2.5.29.19',
-                'oireCommonName' => '2.5.4.3',
-            ]);
-            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
-            self::assertSame($vector->keyId, self::verifyVector($vector)->keyId);
-        } finally {
-            $oids->setValue(null, $savedOids);
-            $reverseOids->setValue(null, $savedReverseOids);
-        }
-    }
-
-    public function testBasicConstraintsWithAnUnmappableElementFailsUnderBlobsOnBadDecodes(): void
-    {
-        $attestation = self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x05\x01\x01\xff\x05\x00")(AttestationBuilder::create())->build();
-        $wasEnabled = ASN1::isBlobsOnBadDecodesEnabled();
-
-        self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
-        ASN1::enableBlobsOnBadDecodes();
-
-        try {
-            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
-        } finally {
-            if (!$wasEnabled) {
-                ASN1::disableBlobsOnBadDecodes();
-            }
-        }
-    }
-
     /**
      * Every process-wide phpseclib setting that code the library calls, or called before it read certificates
      * with its own DER reader, could read. Each closure changes the setting and returns the closure that puts it
@@ -583,11 +346,11 @@ final class AttestationVerifierTest extends TestCase
         yield 'ASN1::ignoreEncodedCache()' => [self::changing([[ASN1::class, 'useEncodedCache']], static fn() => ASN1::ignoreEncodedCache())];
         yield 'ASN1::enable64BitOIDHandling()' => [self::changing([[ASN1::class, 'use64BitOIDHandling']], static fn() => ASN1::enable64BitOIDHandling())];
         yield 'ASN1::loadOIDs() naming every OID the chain reads' => [self::changing([[ASN1::class, 'oids'], [ASN1::class, 'reverseOIDs']], static fn() => ASN1::loadOIDs([
-            'oireKeyUsage' => '2.5.29.15',
-            'oireSubjectKeyIdentifier' => '2.5.29.14',
-            'oireAuthorityKeyIdentifier' => '2.5.29.35',
-            'oireBasicConstraints' => '2.5.29.19',
-            'oireNonce' => NonceExtension::OID,
+            'oireKeyUsage' => SignedCertificate::KEY_USAGE_OID,
+            'oireSubjectKeyIdentifier' => SignedCertificate::SUBJECT_KEY_IDENTIFIER_OID,
+            'oireAuthorityKeyIdentifier' => SignedCertificate::AUTHORITY_KEY_IDENTIFIER_OID,
+            'oireBasicConstraints' => SignedCertificate::BASIC_CONSTRAINTS_OID,
+            'oireNonce' => SignedCertificate::NONCE_OID,
             'oireEcdsaWithSha256' => '1.2.840.10045.4.3.2',
         ]))];
         yield 'X509::ignoreKeyUsage()' => [self::changing([[X509::class, 'checkKeyUsage']], static fn() => X509::ignoreKeyUsage())];
@@ -596,7 +359,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'X509::setTargetValidationDate(null)' => [self::changing([[X509::class, 'targetValidationDate']], static fn() => X509::setTargetValidationDate(null))];
         yield 'X509::setRecurLimit(0)' => [self::changing([[X509::class, 'recur_limit']], static fn() => X509::setRecurLimit(0))];
         yield 'X509::addCA() with another root' => [self::changing([[X509::class, 'CAs']], static fn() => X509::addCA(AttestationBuilder::create()->build()->rootPem))];
-        yield 'X509::registerExtension() for the nonce extension' => [self::changing([[X509::class, 'extensions']], static fn() => X509::registerExtension(NonceExtension::OID, ['type' => ASN1::TYPE_BOOLEAN]))];
+        yield 'X509::registerExtension() for the nonce extension' => [self::changing([[X509::class, 'extensions']], static fn() => X509::registerExtension(SignedCertificate::NONCE_OID, ['type' => ASN1::TYPE_BOOLEAN]))];
         yield 'X509::enableBinaryOutput()' => [self::changing([[X509::class, 'binary']], static fn() => X509::enableBinaryOutput())];
         yield 'PKCS::requirePEM()' => [self::changing([[PKCS::class, 'format']], static fn() => PKCS::requirePEM())];
         yield 'EC::forceEngine(\'PHP\')' => [self::changing([[EC::class, 'forcedEngine']], static fn() => EC::forceEngine('PHP'))];
@@ -640,8 +403,11 @@ final class AttestationVerifierTest extends TestCase
     {
         $chain = AttestationFailureReason::CertificateChain;
         $null = "\x05\x00";
+        $unknownCritical = SignedCertificate::extension(self::UNKNOWN_EXTENSION, "\x05\x00", true);
 
         yield 'intermediate whose basicConstraints adds an unmappable element to cA true' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x05\x01\x01\xff\x05\x00"), $chain];
+        yield 'intermediate whose basicConstraints cA is FALSE' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x03\x01\x01\x00"), $chain];
+        yield 'intermediate whose basicConstraints is empty' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x00"), $chain];
         yield 'intermediate whose basicConstraints cA is 0x01' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x03\x01\x01\x01"), $chain];
         yield 'intermediate whose basicConstraints cA is two octets' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x04\x01\x02\xff\xff"), $chain];
         yield 'intermediate whose basicConstraints has a byte after it' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x03\x01\x01\xff\x00"), $chain];
@@ -651,7 +417,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate whose basicConstraints has its path length before cA' => [self::intermediateExtension(SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => "\x30\x06\x02\x01\x00\x01\x01\xff"), $chain];
         yield 'intermediate with basicConstraints twice' => [self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, SignedCertificate::extension(SignedCertificate::BASIC_CONSTRAINTS, "\x30\x03\x01\x01\xff")]), $chain];
         yield 'intermediate whose key usage has an element after it' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x02\x01\x06" . $null), $chain];
-        yield 'intermediate whose key usage declares eight unused bits' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x02\x08\x06"), $chain];
+        yield 'intermediate whose key usage declares eight unused bits' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x03\x08\x05\x00"), $chain];
         yield 'intermediate whose key usage sets an unused bit' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x02\x01\x07"), $chain];
         yield 'intermediate whose key usage keeps a trailing zero bit' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x02\x00\x06"), $chain];
         yield 'intermediate whose key usage is a constructed bit string' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x23\x04\x03\x02\x01\x06"), $chain];
@@ -660,6 +426,19 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate whose subject key identifier is an integer of the same bytes' => [self::intermediateExtension(SignedCertificate::SUBJECT_KEY_IDENTIFIER, static fn(?string $value): string => "\x02" . mb_substr($value ?? '', 1, null, '8bit')), $chain];
         yield 'intermediate whose serial number has a redundant leading zero' => [self::intermediateFields(static fn(array $fields): array => [$fields[0] ?? '', SignedCertificate::encoded("\x02", "\x00" . SignedCertificate::content($fields[1] ?? '')), ...array_slice($fields, 2)]), $chain];
         yield 'intermediate with its version twice' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x06\x02\x01\x02\x02\x01\x02", ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate whose version holds a NULL' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x02" . $null, ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate without a version, as in v1' => [self::intermediateFields(static fn(array $fields): array => array_slice($fields, 1)), $chain];
+        yield 'intermediate whose version is an explicit v1' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x03\x02\x01\x00", ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate whose version is v2' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x03\x02\x01\x01", ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate whose version is 99' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x03\x02\x01\x63", ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate whose version is negative' => [self::intermediateFields(static fn(array $fields): array => ["\xa0\x03\x02\x01\xff", ...array_slice($fields, 1)]), $chain];
+        yield 'intermediate whose basicConstraints is explicitly not critical' => [self::intermediateExtensions(static fn(array $extensions): array => array_map(
+            static fn(string $extension): string => str_starts_with(SignedCertificate::content($extension), SignedCertificate::BASIC_CONSTRAINTS)
+                ? SignedCertificate::encoded("\x30", SignedCertificate::BASIC_CONSTRAINTS . "\x01\x01\x00" . (array_slice(SignedCertificate::elements(SignedCertificate::content($extension)), -1)[0] ?? ''))
+                : $extension,
+            $extensions,
+        )), $chain];
+        yield 'intermediate with an unknown critical extension' => [self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, $unknownCritical]), $chain];
         yield 'credential whose authority key identifier adds an unknown element' => [self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(?string $value): string => SignedCertificate::encoded("\x30", SignedCertificate::content($value ?? '') . "\x83\x00")), $chain];
         yield 'credential whose authority key identifier holds a constructed key identifier' => [self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(?string $value): string => "\x30\x16\xa0\x14" . mb_substr($value ?? '', 4, null, '8bit')), $chain];
         yield 'credential whose authority key identifier names an issuer with a high tag number' => [self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(?string $value): string => SignedCertificate::encoded("\x30", SignedCertificate::content($value ?? '') . "\xa1\x02\x9f\x00")), $chain];
@@ -668,6 +447,33 @@ final class AttestationVerifierTest extends TestCase
         yield 'credential whose nonce extension holds two octet strings' => [self::credentialExtension(SignedCertificate::NONCE, static fn(?string $value): string => SignedCertificate::encoded("\x30", SignedCertificate::encoded("\xa1", SignedCertificate::content(SignedCertificate::content($value ?? '')) . "\x04\x00"))), AttestationFailureReason::Nonce];
         yield 'credential with an extension of four elements' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0c\x06\x03\x55\x1d\x62\x05\x00\x01\x01\x00\x04\x00"]), $chain];
         yield 'credential with an extension whose critical flag is 0x01' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0a\x06\x03\x55\x1d\x62\x01\x01\x01\x04\x00"]), $chain];
+        yield 'credential with an extension whose critical flag is an explicit FALSE' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0a\x06\x03\x55\x1d\x62\x01\x01\x00\x04\x00"]), $chain];
+        yield 'credential with an unknown critical extension' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x0b\x06\x03\x55\x1d\x62\x01\x01\xff\x04\x01\x00"]), $chain];
+        yield 'credential with an extension whose value is a BIT STRING' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x08\x06\x03\x55\x1d\x62\x03\x01\x00"]), $chain];
+        yield 'credential with an empty list of extensions' => [self::credentialFields(static fn(array $fields): array => [...array_slice($fields, 0, -1), "\xa3\x02\x30\x00"]), $chain];
+        yield 'credential whose extensions tag holds two lists' => [self::credentialFields(static fn(array $fields): array => [
+            ...array_slice($fields, 0, -1),
+            SignedCertificate::encoded("\xa3", SignedCertificate::content(array_slice($fields, -1)[0] ?? '') . "\x30\x00"),
+        ]), $chain];
+        yield 'credential whose issuerUniqueID sets an unused bit' => [self::credentialFields(static fn(array $fields): array => [...array_slice($fields, 0, -1), "\x81\x02\x01\x01", ...array_slice($fields, -1)]), $chain];
+        yield 'credential whose validity holds three times' => [self::credentialFields(static fn(array $fields): array => [
+            ...array_slice($fields, 0, self::VALIDITY_FIELD),
+            SignedCertificate::encoded("\x30", SignedCertificate::content($fields[self::VALIDITY_FIELD] ?? '') . "\x17\x0d270101000000Z"),
+            ...array_slice($fields, self::VALIDITY_FIELD + 1),
+        ]), $chain];
+        yield 'credential whose authority key identifier names only the serial number, the issuer having a key identifier' => [
+            static fn(AttestationBuilder $b): AttestationBuilder => self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(): string => SignedCertificate::encoded("\x30", "\x82\x08" . self::SERIAL_NUMBER))(
+                $b->withIntermediateSerialNumber(new BigInteger(bin2hex(self::SERIAL_NUMBER), 16)),
+            ),
+            $chain,
+        ];
+        yield 'credential whose authority key identifier names the serial number with a redundant leading zero' => [
+            static fn(AttestationBuilder $b): AttestationBuilder => self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(?string $value): string => SignedCertificate::encoded(
+                "\x30",
+                SignedCertificate::content($value ?? '') . "\x82\x09\x00" . self::SERIAL_NUMBER,
+            ))($b->withIntermediateSerialNumber(new BigInteger(bin2hex(self::SERIAL_NUMBER), 16))),
+            $chain,
+        ];
         yield 'credential with an extension whose OID is padded with 0x80' => [self::credentialExtensions(static fn(array $extensions): array => [...$extensions, "\x30\x08\x06\x04\x55\x80\x1d\x62\x04\x00"]), $chain];
         yield 'credential with an element after its extensions' => [self::credentialFields(static fn(array $fields): array => [...$fields, $null]), $chain];
         yield 'credential with an unknown element before its extensions' => [self::credentialFields(static fn(array $fields): array => [...array_slice($fields, 0, -1), "\x84\x00", ...array_slice($fields, -1)]), $chain];
@@ -676,6 +482,10 @@ final class AttestationVerifierTest extends TestCase
         yield 'credential whose notAfter is in the thirteenth month' => [self::credentialNotAfter("\x17\x0d261316120000Z"), $chain];
         yield 'credential whose notAfter is a GeneralizedTime that has passed' => [self::credentialNotAfter("\x18\x0f20260115115959Z"), $chain];
         yield 'credential whose notAfter has fractional seconds' => [self::credentialNotAfter("\x18\x1120260116120000.5Z"), $chain];
+        yield 'credential whose notAfter has a line feed after it' => [self::credentialNotAfter("\x17\x0e260116120000Z\n"), $chain];
+        yield 'credential whose notAfter is a PrintableString' => [self::credentialNotAfter("\x13\x0d260116120000Z"), $chain];
+        yield 'credential whose notAfter is a PrintableString in GeneralizedTime form' => [self::credentialNotAfter("\x13\x0f20260116120000Z"), $chain];
+        yield 'credential whose notAfter in UTCTime is in 1950' => [self::credentialNotAfter("\x17\x0d500101000000Z"), $chain];
     }
 
     /**
@@ -698,6 +508,18 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate whose key usage includes decipherOnly' => [self::intermediateExtension(SignedCertificate::KEY_USAGE, static fn(): string => "\x03\x03\x07\x86\x80")];
         yield 'credential whose notAfter is a GeneralizedTime' => [self::credentialNotAfter("\x18\x0f20260116120000Z")];
         yield 'chain issued last century, in UTCTime' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withTime(new DateTimeImmutable('1999-06-01T12:00:00Z'))];
+        yield 'credential whose notAfter in UTCTime is in 2049' => [self::credentialNotAfter("\x17\x0d491231235959Z")];
+        yield 'credential with issuer and subject unique identifiers' => [self::credentialFields(static fn(array $fields): array => [...array_slice($fields, 0, -1), "\x81\x02\x00\x01", "\x82\x03\x04\x02\x30", ...array_slice($fields, -1)])];
+        yield 'credential whose authority key identifier names the key, the issuer\'s issuer and the serial number' => [
+            static fn(AttestationBuilder $b): AttestationBuilder => self::credentialExtension(SignedCertificate::AUTHORITY_KEY_IDENTIFIER, static fn(?string $value): string => SignedCertificate::encoded(
+                "\x30",
+                SignedCertificate::content($value ?? '') . SignedCertificate::encoded("\xa1", SignedCertificate::encoded("\xa4", "\x30\x00")) . "\x82\x08" . self::SERIAL_NUMBER,
+            ))($b->withIntermediateSerialNumber(new BigInteger(bin2hex(self::SERIAL_NUMBER), 16))),
+        ];
+        yield 'intermediate without a subject key identifier, the credential naming its key identifier' => [
+            static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withoutExtension($tbs, SignedCertificate::SUBJECT_KEY_IDENTIFIER)),
+        ];
+        yield 'intermediate with an unknown extension that is not critical' => [self::intermediateExtensions(static fn(array $extensions): array => [...$extensions, SignedCertificate::extension(self::UNKNOWN_EXTENSION, "\x05\x00")])];
     }
 
     /**
@@ -733,14 +555,15 @@ final class AttestationVerifierTest extends TestCase
         yield 'CA intermediate without keyCertSign' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKeyUsage(['digitalSignature', 'cRLSign'])];
         yield 'credential naming another key as its authority' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialNamingAnotherKey()];
         yield 'credential naming another serial number of its issuer' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialAuthorityCertSerialNumber(new BigInteger(1))];
-        yield 'intermediate with its key usage twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateExtensionTwice(AttestationBuilder::KEY_USAGE_OID)];
-        yield 'intermediate with its subject key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateExtensionTwice(AttestationBuilder::SUBJECT_KEY_IDENTIFIER_OID)];
-        yield 'credential with its authority key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialAuthorityKeyIdentifierTwice()];
+        yield 'intermediate with its key usage twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::KEY_USAGE))];
+        yield 'intermediate with its subject key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::SUBJECT_KEY_IDENTIFIER))];
+        yield 'credential with its authority key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::AUTHORITY_KEY_IDENTIFIER))];
         yield 'credential signed with ECDSA over SHA-1' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialSignatureHash('sha1')];
         yield 'intermediate with an RSA key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(RsaKey::generate())];
         yield 'intermediate with an Ed25519 key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(EC::createKey('Ed25519'))];
-        yield 'credential signed under ecdsa-with-SHA512 inside' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialSignedAlgorithm(SignedCertificate::ECDSA_WITH_SHA512)];
-        yield 'credential signed under id-ecPublicKey inside' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialSignedAlgorithm(SignedCertificate::ID_EC_PUBLIC_KEY)];
+        yield 'credential signed under ecdsa-with-SHA512 inside' => [self::credentialSignedAlgorithm(SignedCertificate::ECDSA_WITH_SHA512)];
+        yield 'credential signed under id-ecPublicKey inside' => [self::credentialSignedAlgorithm(SignedCertificate::ID_EC_PUBLIC_KEY)];
+        yield 'credential issued by a CA the chain does not hold, named in caIssuers' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')];
     }
 
     /**
@@ -790,6 +613,7 @@ final class AttestationVerifierTest extends TestCase
      */
     public static function provideReencodedCertificates(): iterable
     {
+        yield 'credential with a fourth element after its signature' => [false, static fn(string $tbs, string $algorithm, string $bits): string => SignedCertificate::encoded("\x30", $tbs . $algorithm . SignedCertificate::encoded("\x03", $bits) . "\x05\x00")];
         yield 'credential with bytes after the ECDSA signature' => [false, static fn(string $tbs, string $algorithm, string $bits): string => SignedCertificate::join($tbs, $algorithm, $bits . "\xde\xad\xbe\xef")];
         yield 'credential with the ECDSA signature length in long form' => [false, static fn(string $tbs, string $algorithm, string $bits): string => SignedCertificate::join($tbs, $algorithm, "\x00\x30\x81" . mb_substr($bits, 2, null, '8bit'))];
         yield 'credential with a zero byte before r' => [false, static fn(string $tbs, string $algorithm, string $bits): string => SignedCertificate::join($tbs, $algorithm, self::withZeroBeforeR($bits))];
@@ -900,7 +724,7 @@ final class AttestationVerifierTest extends TestCase
     public function testTwoNonceExtensionsFailTheNonce(?string $earlierDer): void
     {
         $attestation = AttestationBuilder::create()
-            ->withNonceExtensionTwice($earlierDer)
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::NONCE, $earlierDer))
             ->build();
 
         self::assertFailure(AttestationFailureReason::Nonce, static fn() => self::verifyBuilt($attestation));
@@ -1091,7 +915,7 @@ final class AttestationVerifierTest extends TestCase
     }
 
     #[DataProvider('provideNestedSequencePositions')]
-    public function testNestedSequencesOverTheCertificateLimitAreRefusedBeforeTheyAreParsed(bool $asIntermediate): void
+    public function testDeeplyNestedSequencesAreRefusedCheaply(bool $asIntermediate): void
     {
         $attestation = AttestationBuilder::create()->build();
         $nested = self::nestedSequences(self::NESTED_SEQUENCES_LENGTH);
@@ -1100,6 +924,58 @@ final class AttestationVerifierTest extends TestCase
 
         self::assertLessThanOrEqual(self::MAX_LENGTH, mb_strlen($cbor, '8bit'));
         self::assertRefusedCheaply(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation, cbor: $cbor));
+    }
+
+    /**
+     * @return iterable<string, array{bool, int, bool}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideCertificateLengthsAroundTheLimit(): iterable
+    {
+        yield 'credential of 4096 bytes' => [false, self::MAX_CERTIFICATE_LENGTH, true];
+        yield 'credential of 4097 bytes' => [false, self::MAX_CERTIFICATE_LENGTH + 1, false];
+        yield 'intermediate of 4096 bytes' => [true, self::MAX_CERTIFICATE_LENGTH, true];
+        yield 'intermediate of 4097 bytes' => [true, self::MAX_CERTIFICATE_LENGTH + 1, false];
+    }
+
+    #[DataProvider('provideCertificateLengthsAroundTheLimit')]
+    public function testCertificateIsAtMost4096Bytes(bool $intermediate, int $length, bool $accepted): void
+    {
+        $attestation = self::withCertificateOfLength($intermediate, $length);
+
+        if ($accepted) {
+            self::assertSame($attestation->keyId, self::verifyBuilt($attestation)->keyId);
+        } else {
+            self::assertFailure(AttestationFailureReason::CertificateChain, static fn() => self::verifyBuilt($attestation));
+        }
+    }
+
+    /**
+     * @return iterable<string, array{string, bool}>
+     *
+     * @psalm-capabilities read-props
+     */
+    public static function provideTimesAroundTheCredentialValidity(): iterable
+    {
+        yield 'at its notBefore' => ['-1 day', true];
+        yield 'a second before its notBefore' => ['-1 day -1 second', false];
+        yield 'at its notAfter' => ['+1 day', true];
+        yield 'a second after its notAfter' => ['+1 day +1 second', false];
+    }
+
+    #[DataProvider('provideTimesAroundTheCredentialValidity')]
+    public function testCredentialIsValidFromItsNotBeforeToItsNotAfter(string $offset, bool $accepted): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+        $verifier = new AttestationVerifier($attestation->trustAnchor(), new MockClock($attestation->clock()->now()->modify($offset)));
+        $verification = static fn(): AttestedKey => $verifier->verify($attestation->cbor, $attestation->clientDataHash, $attestation->keyId, $attestation->app, [Environment::Development]);
+
+        if ($accepted) {
+            self::assertSame($attestation->keyId, $verification()->keyId);
+        } else {
+            self::assertFailure(AttestationFailureReason::CertificateChain, $verification);
+        }
     }
 
     public function testIntermediateWithAnotherCaInAppendedPemFailsTheChain(): void
@@ -1810,7 +1686,10 @@ final class AttestationVerifierTest extends TestCase
                 ->build())],
             'TrustAnchor::fromPem() of a built root' => ['accepted', self::trustAnchorOutcome($built->rootPem)],
             'TrustAnchor::fromPem() of Apple\'s root' => ['accepted', self::trustAnchorOutcome(TrustAnchor::apple()->pem)],
-            'TrustAnchor::fromPem() of a root without key usage' => ['refused', self::trustAnchorOutcome(AttestationBuilder::create()->withRootWithoutKeyUsage()->build()->rootPem)],
+            'TrustAnchor::fromPem() of a root without key usage' => ['refused', self::trustAnchorOutcome(AttestationBuilder::create()
+                ->withRootWithoutKeyUsage()
+                ->build()
+                ->rootPem)],
         ];
 
         foreach (Fixtures::attestations() as $name => $vector) {
@@ -1946,6 +1825,21 @@ final class AttestationVerifierTest extends TestCase
     private static function credentialFields(Closure $edit): Closure
     {
         return static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withFields($tbs, $edit));
+    }
+
+    /**
+     * The credential certificate with this signature AlgorithmIdentifier (DER) inside its tbsCertificate, while
+     * its signatureAlgorithm stays ecdsa-with-SHA256, signed by the intermediate with SHA-256.
+     *
+     * @return Closure(AttestationBuilder): AttestationBuilder
+     */
+    private static function credentialSignedAlgorithm(string $algorithm): Closure
+    {
+        return self::credentialFields(static fn(array $fields): array => [
+            ...array_slice($fields, 0, SignedCertificate::SIGNED_ALGORITHM_FIELD),
+            $algorithm,
+            ...array_slice($fields, SignedCertificate::SIGNED_ALGORITHM_FIELD + 1),
+        ]);
     }
 
     /**
@@ -2264,14 +2158,42 @@ final class AttestationVerifierTest extends TestCase
     }
 
     /**
+     * A built chain whose credential certificate, or intermediate, is exactly this many bytes long, padded with
+     * a well-formed extension the chain does not read. The ECDSA signature's length varies, so it takes a few
+     * attempts.
+     */
+    private static function withCertificateOfLength(bool $intermediate, int $length): BuiltAttestation
+    {
+        $padding = intdiv($length, 2);
+
+        for ($attempt = 0; $attempt < self::LENGTH_ATTEMPTS; ++$attempt) {
+            $extension = SignedCertificate::extension(self::UNKNOWN_EXTENSION, SignedCertificate::encoded("\x04", str_repeat("\x00", $padding)));
+            $edit = static fn(string $tbs): string => SignedCertificate::withExtensions($tbs, static fn(array $extensions): array => [...$extensions, $extension]);
+            $builder = AttestationBuilder::create();
+            $attestation = ($intermediate ? $builder->withIntermediateTbsCertificate($edit) : $builder->withCredentialTbsCertificate($edit))->build();
+            $built = mb_strlen($intermediate ? $attestation->intermediateDer : $attestation->credentialDer, '8bit');
+
+            if ($built === $length) {
+                return $attestation;
+            }
+
+            $padding += $length - $built;
+        }
+
+        self::fail('No certificate of ' . $length . ' bytes could be built.');
+    }
+
+    /**
      * Definite-length SEQUENCEs nested inside each other, at least this many bytes in all.
+     *
+     * @psalm-pure
      */
     private static function nestedSequences(int $length): string
     {
         $der = '';
 
         while (mb_strlen($der, '8bit') < $length) {
-            $der = "\x30" . ASN1::encodeLength(mb_strlen($der, '8bit')) . $der;
+            $der = SignedCertificate::encoded("\x30", $der);
         }
 
         return $der;

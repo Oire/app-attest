@@ -74,12 +74,13 @@ final readonly class TrustAnchor
     public static function fromPem(string $pem): self
     {
         $der = Pem::tryDecode($pem, Pem::CERTIFICATE);
+        $root = $der === null ? null : Certificate::tryParse($der);
 
-        if ($der === null || Certificate::tryParse($der) === null) {
+        if ($root === null) {
             throw new InvalidArgumentException('The trust anchor must be exactly one PEM-encoded X.509 certificate.');
         }
 
-        if (!CertificateChain::canAnchor($der)) {
+        if (!CertificateChain::canAnchor($root)) {
             throw new InvalidArgumentException('The trust anchor must hold an EC key, not an Ed25519 or Ed448 one, and a key usage extension that includes keyCertSign.');
         }
 

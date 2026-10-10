@@ -319,10 +319,13 @@ log. Do not send them to the client: refuse with a generic answer.
   in it distinct text strings, `x5c` an array, `fmt` a text string, and `x5c`'s entries, `receipt` and
   `authData` byte strings.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
-  an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is not exactly
-  one DER `SEQUENCE` with nothing after it, or is longer than 4096 bytes (Apple's are about 1 KiB).
-* `Nonce` — the credential certificate has no nonce extension, or its nonce does not match `authData` and
-  `$clientDataHash`. A `clientDataHash` formed differently from the app's ends here.
+  an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is longer than
+  4096 bytes (Apple's are about 1 KiB), is not DER where the library reads it, marks critical an extension
+  the library does not process, is not signed by its issuer with ECDSA over SHA-256, SHA-384 or SHA-512, or
+  its issuer lacks `keyCertSign`, has another subject Name or another key identifier (see Trust Anchor).
+* `Nonce` — the credential certificate has no nonce extension, has it twice or malformed, or its nonce does
+  not match `authData` and `$clientDataHash`. A `clientDataHash` formed differently from the app's ends
+  here.
 * `KeyId` — the credential certificate's key, or the `credentialId` in `authData`, does not match the key
   id.
 * `RpIdHash` — the key belongs to another team or bundle.
@@ -359,8 +362,9 @@ cannot be mistaken for a forged request:
   `'production'` or `'development'`;
 * a `LaunchPolicy` category list holding anything but `ValidationCategory` cases, and
   `LaunchPolicy::allowing()` called with no category;
-* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate, or whose certificate has no
-  EC key or no key usage that includes `keyCertSign`, so that no chain could lead to it.
+* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate, whose certificate is not DER
+  where the library reads it, or that has no EC key or no key usage that includes `keyCertSign`, so that no
+  chain could lead to it.
 
 A broken installation is a `LogicException`, not a failed verification: `TrustAnchor::apple()`, which
 `AttestationVerifier` calls when you pass no trust anchor, throws one if the bundled Apple root is missing or
@@ -429,16 +433,28 @@ use Oire\AppAttest\TrustAnchor;
 $verifier = new AttestationVerifier(TrustAnchor::fromPem($testRootPem));
 ```
 
-Like Apple's, a test chain must use EC keys (not Ed25519 or Ed448), sign each certificate with ECDSA over
-SHA-256, SHA-384 or SHA-512, give its root and intermediate a key usage extension that includes
-`keyCertSign`, and mark the intermediate as a CA in `basicConstraints`. `TrustAnchor::fromPem()` throws an
-`InvalidArgumentException` for a root without an EC key or without `keyCertSign`; a chain that misses any of
-the rest fails every attestation with `CertificateChain`. An issuer without a key usage extension fails like
-one without `keyCertSign`, and each certificate must name its issuer with exactly the bytes of the issuer's
-subject name. Every certificate, the root included, must be DER where the library reads it, as any CA's
-output is: lengths in their shortest form, booleans `0x00` or `0xFF`, validity times in UTC with seconds,
-the key usage without trailing zero bits, and each of the key usage, key identifier, `basicConstraints`
-and nonce extensions at most once.
+A test chain must, like Apple's:
+
+* use EC keys, not Ed25519 or Ed448;
+* sign each certificate with ECDSA over SHA-256, SHA-384 or SHA-512, with the same algorithm, without
+  parameters, inside and outside `tbsCertificate`;
+* give the root and the intermediate exactly one key usage extension that includes `keyCertSign`;
+* mark the intermediate as a CA with exactly one `basicConstraints` (`cA` true, an optional non-negative
+  path length);
+* name each issuer with exactly the bytes of the issuer's subject Name and, if a certificate carries an
+  authority key identifier, name in it the issuer's subject key identifier and, if it holds one, the
+  issuer's serial number;
+* mark critical, in the intermediate and the credential certificate, only `basicConstraints`, the key
+  usage, the key identifiers and the nonce extension;
+* keep all three certificates valid at the clock's time;
+* be v3 certificates and DER where the library reads them: lengths, integers and OIDs in their shortest
+  form, booleans `0x00` or `0xFF`, a critical flag left out rather than FALSE, validity times in UTC with
+  seconds and no fraction, nothing after the extensions, the key usage without trailing zero bits, and each
+  of the key usage, key identifier, `basicConstraints` and nonce extensions at most once.
+
+`TrustAnchor::fromPem()` throws an `InvalidArgumentException` for a root that has no EC key, no
+`keyCertSign` or is not DER; any other miss fails every attestation with `CertificateChain`, except a nonce
+extension that is missing, repeated or not `SEQUENCE { [1] { OCTET STRING } }`, which fails with `Nonce`.
 
 ## Using phpseclib in Your Application
 
@@ -449,11 +465,10 @@ neither alongside it. phpseclib keeps its settings in static properties shared b
 them: unlike 1.x, it neither disables phpseclib's URL fetching nor registers the App Attest nonce extension
 with phpseclib.
 
-Since no phpseclib switch applies, the library makes its own checks: it requires `keyCertSign` of each
-issuer, the CA flag of the intermediate, matching key identifiers and an issuer name equal byte for byte to
-the issuer's subject name, matches extensions and the signature algorithm by their encoded OIDs, and decodes
+Since no phpseclib switch applies, the library makes its own checks, listed under Trust Anchor, and decodes
 the nonce extension itself. Verification makes no network call: issuer certificates named in
-`authorityInfoAccess` are never fetched.
+`authorityInfoAccess` are never fetched. If your own code validates certificates with phpseclib and relied on
+URL fetching being off, call `X509::disableURLFetch()` yourself.
 
 ## Testing Your Own Code
 
@@ -495,12 +510,16 @@ them into the nonce first, is refused with `Signature`. To test a `LaunchPolicy`
 `{"validationCategory": 4, "bundleVersion": "2.1"}` to the 37 bytes of `authenticatorData` before forming
 the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library already requires.
 
-Attestations are harder to make, because they need a certificate chain with the nonce extension. This
-repository's test-only
-[AttestationBuilder](https://github.com/Oire/app-attest/blob/master/tests/Support/AttestationBuilder.php)
-shows how to sign one with phpseclib 4 and verify it against `TrustAnchor::fromPem()` of its own root. The
-test code is not part of the Composer package, and phpseclib is only a development dependency of this
-repository: require it yourself to build chains the same way.
+Attestations are harder to make, because they need a certificate chain with the nonce extension. The
+credential certificate carries the nonce in extension `1.2.840.113635.100.8.2`, whose value is the DER
+`SEQUENCE { [1] EXPLICIT OCTET STRING }` around the 32-byte SHA-256 of `authData` followed by
+`clientDataHash`. Any tool that issues EC certificates with ECDSA works, as long as the chain meets the rules
+under Trust Anchor; verify it against `TrustAnchor::fromPem()` of its own root. This repository's test-only
+[AttestationBuilder](https://github.com/Oire/app-attest/blob/v2.0.0/tests/Support/AttestationBuilder.php)
+and [SignedCertificate](https://github.com/Oire/app-attest/blob/v2.0.0/tests/Support/SignedCertificate.php)
+show one way with phpseclib 4, which is only a development dependency of this repository: require it yourself
+to build chains the same way, and write the nonce extension's OID yourself rather than reaching for the
+library's `Internal` classes, which are not public API. The test code is not part of the Composer package.
 
 ## API Reference
 
