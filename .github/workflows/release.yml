@@ -17,6 +17,6 @@ jobs:
 
       # Packagist is updated by its GitHub webhook, not by this workflow.
       - name: Create the GitHub Release
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Version ${GITHUB_REF_NAME#v}"
         env:
           GH_TOKEN: ${{ github.token }}
