@@ -25,9 +25,10 @@ use ErrorException;
  */
 
 /**
- * Runs third-party parsing of untrusted bytes with PHP warnings and notices turned into exceptions,
- * so none of them escapes to the caller. Deprecations, and warnings silenced with @, go on to the error
- * handler that was active before, so a dependency's deprecation never turns into a failed verification.
+ * Runs parsing of untrusted bytes, by cbor-php or by the library's DER reader with OpenSSL's key and signature
+ * calls, with PHP warnings and notices turned into exceptions, so none of them escapes to the caller.
+ * Deprecations, and warnings silenced with @, go on to the error handler that was active before, so a
+ * dependency's deprecation never turns into a failed verification.
  *
  * A lowered error_reporting() level alone does not disable the guard: hosts such as PHPUnit lower it while
  * their own handler still reports every warning.

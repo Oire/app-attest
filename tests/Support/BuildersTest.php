@@ -8,11 +8,19 @@ use CBOR\Decoder;
 use CBOR\Normalizable;
 use CBOR\StringStream;
 use DateTimeImmutable;
+use DateTimeInterface;
 use Oire\AppAttest\Value\AppIdentity;
 use Oire\AppAttest\Value\BundleId;
 use Oire\AppAttest\Value\Environment;
 use Oire\AppAttest\Value\TeamId;
-use phpseclib3\File\X509;
+use phpseclib4\File\ASN1;
+use phpseclib4\File\ASN1\Constructed;
+use phpseclib4\File\ASN1\Types\BaseString;
+use phpseclib4\File\ASN1\Types\BitString;
+use phpseclib4\File\ASN1\Types\Boolean;
+use phpseclib4\File\ASN1\Types\Choice;
+use phpseclib4\File\X509;
+use phpseclib4\Math\BigInteger;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -33,8 +41,6 @@ use PHPUnit\Framework\TestCase;
  */
 final class BuildersTest extends TestCase
 {
-    private const string NONCE_EXTENSION_OID_DER = "\x06\x09\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
-
     public function testBuiltAttestationHasTheAppleLayout(): void
     {
         $attestation = AttestationBuilder::create()->build();
@@ -112,7 +118,225 @@ final class BuildersTest extends TestCase
             ->build();
 
         self::assertFalse(self::isCa($attestation->intermediateDer));
+        self::assertTrue(self::hasKeyCertSign($attestation->intermediateDer));
+        self::assertTrue(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
         self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
+    }
+
+    public function testCertificatesSplitAndJoinBackUnchanged(): void
+    {
+        $attestation = AttestationBuilder::create()->build();
+
+        foreach ([$attestation->credentialDer, $attestation->intermediateDer, Pem::toDer($attestation->rootPem)] as $der) {
+            self::assertSame($der, SignedCertificate::join(...SignedCertificate::split($der)));
+        }
+    }
+
+    public function testEachChainLinkCanFailOneIssuerCheckAlone(): void
+    {
+        $intermediateByAnotherKey = AttestationBuilder::create()
+            ->withIntermediateSignedByAnotherKey()
+            ->build();
+        $credentialByAnotherKey = AttestationBuilder::create()
+            ->withCredentialSignedByAnotherKey()
+            ->build();
+        $intermediateNamingAnotherIssuer = AttestationBuilder::create()
+            ->withIntermediateIssuerName('Oire Test Other Root CA')
+            ->build();
+        $credentialNamingAnotherIssuer = AttestationBuilder::create()
+            ->withCredentialIssuerName('Oire Test Other CA')
+            ->build();
+
+        self::assertTrue(self::isIssuerOf(Pem::toDer($intermediateByAnotherKey->rootPem), $intermediateByAnotherKey->intermediateDer));
+        self::assertFalse(self::signedBy($intermediateByAnotherKey->intermediateDer, Pem::toDer($intermediateByAnotherKey->rootPem)));
+        self::assertTrue(self::isIssuerOf($credentialByAnotherKey->intermediateDer, $credentialByAnotherKey->credentialDer));
+        self::assertFalse(self::signedBy($credentialByAnotherKey->credentialDer, $credentialByAnotherKey->intermediateDer));
+        self::assertFalse(self::isIssuerOf(Pem::toDer($intermediateNamingAnotherIssuer->rootPem), $intermediateNamingAnotherIssuer->intermediateDer));
+        self::assertTrue(self::signedBy($intermediateNamingAnotherIssuer->intermediateDer, Pem::toDer($intermediateNamingAnotherIssuer->rootPem)));
+        self::assertFalse(self::isIssuerOf($credentialNamingAnotherIssuer->intermediateDer, $credentialNamingAnotherIssuer->credentialDer));
+        self::assertTrue(self::signedBy($credentialNamingAnotherIssuer->credentialDer, $credentialNamingAnotherIssuer->intermediateDer));
+    }
+
+    public function testIntermediateKeyUsageCanLackKeyCertSign(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withIntermediateKeyUsage(['digitalSignature', 'cRLSign'])
+            ->build();
+
+        self::assertTrue(self::isCa($attestation->intermediateDer));
+        self::assertFalse(self::hasKeyCertSign($attestation->intermediateDer));
+        self::assertFalse(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
+        self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+    }
+
+    public function testIssuerNamesCanDifferOnlyInCaseOrSpacing(): void
+    {
+        $intermediateInCapitals = AttestationBuilder::create()
+            ->withIntermediateIssuerName('OIRE TEST APP ATTESTATION ROOT CA')
+            ->build();
+        $credentialWithDoubledSpaces = AttestationBuilder::create()
+            ->withCredentialIssuerName('Oire  Test  App  Attestation  CA')
+            ->build();
+        $rootDer = Pem::toDer($intermediateInCapitals->rootPem);
+
+        self::assertFalse(self::isIssuerOf($rootDer, $intermediateInCapitals->intermediateDer));
+        self::assertFalse(self::isIssuerOf($credentialWithDoubledSpaces->intermediateDer, $credentialWithDoubledSpaces->credentialDer));
+        self::assertTrue(self::signedBy($intermediateInCapitals->intermediateDer, $rootDer));
+        self::assertTrue(self::signedBy($credentialWithDoubledSpaces->credentialDer, $credentialWithDoubledSpaces->intermediateDer));
+    }
+
+    public function testIntermediateCanBeExpiredOrNotYetValid(): void
+    {
+        $expired = AttestationBuilder::create()
+            ->withExpiredIntermediate()
+            ->build();
+        $notYetValid = AttestationBuilder::create()
+            ->withIntermediateNotYetValid()
+            ->build();
+        $now = $expired->clock()->now();
+
+        foreach ([$expired, $notYetValid] as $attestation) {
+            self::assertFalse(self::validAt($attestation->intermediateDer, $now));
+            self::assertTrue(self::validAt($attestation->rootPem, $now));
+            self::assertTrue(self::validAt($attestation->credentialDer, $now));
+            self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+            self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
+        }
+
+        self::assertTrue(self::validAt($expired->intermediateDer, $now->modify('-2 days')));
+        self::assertTrue(self::validAt($notYetValid->intermediateDer, $now->modify('+2 days')));
+    }
+
+    public function testCredentialAuthorityKeyIdentifierCanNameAnotherKeyOrSerialNumber(): void
+    {
+        $serialNumber = new BigInteger('0102030405060708', 16);
+        $anotherKey = AttestationBuilder::create()
+            ->withCredentialNamingAnotherKey()
+            ->build();
+        $anotherSerialNumber = AttestationBuilder::create()
+            ->withCredentialAuthorityCertSerialNumber(new BigInteger(1))
+            ->build();
+        $issuerSerialNumber = AttestationBuilder::create()
+            ->withIntermediateSerialNumber($serialNumber)
+            ->withCredentialAuthorityCertSerialNumber($serialNumber)
+            ->build();
+
+        self::assertFalse(self::isIssuerOf($anotherKey->intermediateDer, $anotherKey->credentialDer));
+        self::assertTrue(self::signedBy($anotherKey->credentialDer, $anotherKey->intermediateDer));
+        self::assertFalse(self::isIssuerOf($anotherSerialNumber->intermediateDer, $anotherSerialNumber->credentialDer));
+        self::assertTrue(self::signedBy($anotherSerialNumber->credentialDer, $anotherSerialNumber->intermediateDer));
+        self::assertTrue(self::isIssuerOf($issuerSerialNumber->intermediateDer, $issuerSerialNumber->credentialDer));
+    }
+
+    public function testKeyUsageOrKeyIdentifiersCanComeTwice(): void
+    {
+        $keyUsageTwice = AttestationBuilder::create()
+            ->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::KEY_USAGE))
+            ->build();
+        $subjectKeyIdentifierTwice = AttestationBuilder::create()
+            ->withIntermediateTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::SUBJECT_KEY_IDENTIFIER))
+            ->build();
+        $authorityKeyIdentifierTwice = AttestationBuilder::create()
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::AUTHORITY_KEY_IDENTIFIER))
+            ->build();
+
+        foreach ([$keyUsageTwice, $subjectKeyIdentifierTwice, $authorityKeyIdentifierTwice] as $attestation) {
+            self::assertTrue(self::signedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
+            self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+            self::assertTrue(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
+        }
+
+        self::assertSame(2, self::extensionCount($keyUsageTwice->intermediateDer, SignedCertificate::KEY_USAGE));
+        self::assertSame(2, self::extensionCount($subjectKeyIdentifierTwice->intermediateDer, SignedCertificate::SUBJECT_KEY_IDENTIFIER));
+        self::assertSame(2, self::extensionCount($authorityKeyIdentifierTwice->credentialDer, SignedCertificate::AUTHORITY_KEY_IDENTIFIER));
+        self::assertSame(1, self::extensionCount($authorityKeyIdentifierTwice->intermediateDer, SignedCertificate::SUBJECT_KEY_IDENTIFIER));
+    }
+
+    public function testCertificatesCanBeEditedAndSignedAgain(): void
+    {
+        $basicConstraints = "\x30\x06\x01\x01\xff\x02\x01\x00";
+        $setBasicConstraints = static fn(string $tbs): string => SignedCertificate::withExtensionValue($tbs, SignedCertificate::BASIC_CONSTRAINTS, static fn(): string => $basicConstraints);
+        $replaced = AttestationBuilder::create()
+            ->withIntermediateTbsCertificate($setBasicConstraints)
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withFields($tbs, static fn(array $fields): array => [...$fields, "\x05\x00"]))
+            ->build();
+        $added = AttestationBuilder::create()
+            ->withIntermediateNotCa()
+            ->withIntermediateTbsCertificate($setBasicConstraints)
+            ->build();
+        $credentialFields = SignedCertificate::elements(SignedCertificate::content(SignedCertificate::split($replaced->credentialDer)[0]));
+
+        foreach ([$replaced, $added] as $attestation) {
+            self::assertSame(1, mb_substr_count($attestation->intermediateDer, SignedCertificate::BASIC_CONSTRAINTS, '8bit'));
+            self::assertStringContainsString("\x04\x08" . $basicConstraints, $attestation->intermediateDer);
+            self::assertTrue(self::signedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
+            self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+        }
+
+        self::assertSame(["\x05\x00"], array_slice($credentialFields, -1));
+        self::assertStringContainsString(SignedCertificate::extension(SignedCertificate::BASIC_CONSTRAINTS, $basicConstraints), $added->intermediateDer);
+    }
+
+    public function testRootCanLackKeyUsage(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withRootWithoutKeyUsage()
+            ->build();
+        $rootDer = Pem::toDer($attestation->rootPem);
+
+        self::assertNull(X509::load($rootDer, ASN1::FORMAT_DER)->getExtension('id-ce-keyUsage'));
+        self::assertTrue(self::isCa($attestation->rootPem));
+        self::assertTrue(self::signedBy($attestation->intermediateDer, $rootDer));
+    }
+
+    public function testCredentialSignatureCanUseAnotherHashOrAlgorithm(): void
+    {
+        $sha512 = AttestationBuilder::create()
+            ->withCredentialSignatureHash('sha512')
+            ->build();
+        $relabeled = AttestationBuilder::create()
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withFields($tbs, static fn(array $fields): array => [
+                ...array_slice($fields, 0, SignedCertificate::SIGNED_ALGORITHM_FIELD),
+                SignedCertificate::ECDSA_WITH_SHA512,
+                ...array_slice($fields, SignedCertificate::SIGNED_ALGORITHM_FIELD + 1),
+            ]))
+            ->build();
+        [$tbsCertificate, $algorithm] = SignedCertificate::split($relabeled->credentialDer);
+        $signedAlgorithm = SignedCertificate::elements(SignedCertificate::content($tbsCertificate))[SignedCertificate::SIGNED_ALGORITHM_FIELD] ?? null;
+
+        self::assertSame(SignedCertificate::ECDSA_WITH_SHA512, SignedCertificate::split($sha512->credentialDer)[1]);
+        self::assertTrue(self::signedBy($sha512->credentialDer, $sha512->intermediateDer, 'sha512'));
+        self::assertSame(SignedCertificate::ECDSA_WITH_SHA256, $algorithm);
+        self::assertSame(SignedCertificate::ECDSA_WITH_SHA512, $signedAlgorithm);
+        self::assertTrue(self::signedBy($relabeled->credentialDer, $relabeled->intermediateDer));
+    }
+
+    public function testIntermediateCanHoldAnRsaKeyThatSignsUnderTheEcdsaLabel(): void
+    {
+        $attestation = AttestationBuilder::create()
+            ->withIntermediateKey(RsaKey::generate())
+            ->build();
+        $intermediateKey = openssl_pkey_get_public(Pem::fromDer($attestation->intermediateDer, Pem::CERTIFICATE));
+        self::assertNotFalse($intermediateKey);
+
+        self::assertSame(OPENSSL_KEYTYPE_RSA, openssl_pkey_get_details($intermediateKey)['type'] ?? null);
+        self::assertSame(SignedCertificate::ECDSA_WITH_SHA256, SignedCertificate::split($attestation->credentialDer)[1]);
+        self::assertTrue(self::signedBy($attestation->credentialDer, $attestation->intermediateDer));
+        self::assertTrue(self::isIssuerOf($attestation->intermediateDer, $attestation->credentialDer));
+    }
+
+    public function testNonceExtensionCanHaveBytesAfterItOrComeTwice(): void
+    {
+        $suffixed = AttestationBuilder::create()
+            ->withNonceExtensionSuffix("\x00")
+            ->build();
+        $twice = AttestationBuilder::create()
+            ->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::NONCE))
+            ->build();
+        $nonce = hash('sha256', $suffixed->authData . $suffixed->clientDataHash, true);
+
+        self::assertSame(AttestationBuilder::nonceExtensionDer($nonce) . "\x00", self::nonceExtensionOf($suffixed->credentialDer));
+        self::assertSame(2, mb_substr_count($twice->credentialDer, SignedCertificate::NONCE, '8bit'));
     }
 
     public function testAuthDataFieldsCanBeChosen(): void
@@ -253,13 +477,14 @@ final class BuildersTest extends TestCase
         $attestation = AttestationBuilder::create()
             ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
             ->build();
-        $credential = new X509();
-        self::assertIsArray($credential->loadX509($attestation->credentialDer));
+        $credential = X509::load($attestation->credentialDer);
+        $authorityInfoAccess = $credential->getExtension('id-pe-authorityInfoAccess')['extnValue'] ?? null;
+        self::assertInstanceOf(Constructed::class, $authorityInfoAccess);
 
-        self::assertSame(['Oire Test Unlisted CA'], $credential->getIssuerDNProp('id-at-commonName'));
+        self::assertSame(['Oire Test Unlisted CA'], array_map(static fn(BaseString $name): string => $name->value, $credential->getIssuerDNProps('id-at-commonName')));
         self::assertSame(
             [['accessMethod' => 'id-ad-caIssuers', 'accessLocation' => ['uniformResourceIdentifier' => 'http://192.0.2.1/ca.cer']]],
-            $credential->getExtension('id-pe-authorityInfoAccess'),
+            $authorityInfoAccess->toArray(true),
         );
         self::assertNotNull(self::nonceExtensionOf($attestation->credentialDer));
     }
@@ -374,48 +599,114 @@ final class BuildersTest extends TestCase
 
     private static function nonceExtensionOf(string $certificateDer): ?string
     {
-        $offset = mb_strpos($certificateDer, self::NONCE_EXTENSION_OID_DER, 0, '8bit');
+        $offset = mb_strpos($certificateDer, SignedCertificate::NONCE, 0, '8bit');
 
         if ($offset === false) {
             return null;
         }
 
-        $octetString = mb_substr($certificateDer, $offset + mb_strlen(self::NONCE_EXTENSION_OID_DER, '8bit'), 2, '8bit');
+        $octetString = mb_substr($certificateDer, $offset + mb_strlen(SignedCertificate::NONCE, '8bit'), 2, '8bit');
         self::assertSame("\x04", $octetString[0]);
 
-        return mb_substr($certificateDer, $offset + mb_strlen(self::NONCE_EXTENSION_OID_DER, '8bit') + 2, ord($octetString[1]), '8bit');
+        return mb_substr($certificateDer, $offset + mb_strlen(SignedCertificate::NONCE, '8bit') + 2, ord($octetString[1]), '8bit');
     }
 
     private static function issuedBy(string $certificate, string $issuer): bool
     {
-        $x509 = new X509();
-        self::assertTrue($x509->loadCA($issuer));
-        self::assertIsArray($x509->loadX509($certificate));
+        $authorities = X509::getCAs();
+        $date = X509::getTargetValidationDate();
+        X509::clearCAStore();
+        X509::addCA($issuer);
+        X509::setTargetValidationDate(null);
 
-        return $x509->validateSignature() === true;
+        try {
+            return X509::load($certificate)->validateSignature();
+        } finally {
+            X509::clearCAStore();
+
+            foreach ($authorities as $authority) {
+                self::assertInstanceOf(X509::class, $authority);
+                X509::addCA($authority);
+            }
+
+            X509::setTargetValidationDate($date);
+        }
+    }
+
+    private static function signedBy(string $certificate, string $issuer, string $hash = 'sha256'): bool
+    {
+        [$tbsCertificate, , $bits] = SignedCertificate::split($certificate);
+        $key = openssl_pkey_get_public(Pem::fromDer($issuer, Pem::CERTIFICATE));
+        self::assertNotFalse($key);
+
+        return openssl_verify($tbsCertificate, mb_substr($bits, 1, null, '8bit'), $key, $hash) === 1;
+    }
+
+    /**
+     * How many extensions with the OID (DER) the certificate holds, and all of them with the same value.
+     */
+    private static function extensionCount(string $der, string $oid): int
+    {
+        $fields = SignedCertificate::elements(SignedCertificate::content(SignedCertificate::split($der)[0]));
+        $extensions = SignedCertificate::elements(SignedCertificate::content(SignedCertificate::content(array_slice($fields, -1)[0] ?? '')));
+        $values = [];
+
+        foreach ($extensions as $extension) {
+            $parts = SignedCertificate::elements(SignedCertificate::content($extension));
+
+            if (($parts[0] ?? null) === $oid) {
+                $values[] = array_slice($parts, -1)[0] ?? '';
+            }
+        }
+
+        self::assertLessThanOrEqual(1, count(array_unique($values)));
+
+        return count($values);
+    }
+
+    private static function isIssuerOf(string $issuer, string $certificate): bool
+    {
+        return X509::load($issuer, ASN1::FORMAT_DER)->isIssuerOf(X509::load($certificate, ASN1::FORMAT_DER));
+    }
+
+    private static function hasKeyCertSign(string $certificate): bool
+    {
+        $keyUsage = X509::load($certificate, ASN1::FORMAT_DER)->getExtension('id-ce-keyUsage')['extnValue'] ?? null;
+        self::assertInstanceOf(BitString::class, $keyUsage);
+
+        return $keyUsage->contains('keyCertSign');
     }
 
     private static function isCa(string $certificate): bool
     {
-        $x509 = new X509();
-        self::assertIsArray($x509->loadX509($certificate));
+        $basicConstraints = X509::load($certificate)->getExtension('id-ce-basicConstraints')['extnValue'] ?? null;
 
-        return self::assertsCa($x509->getExtension('id-ce-basicConstraints'));
-    }
+        if ($basicConstraints === null) {
+            return false;
+        }
 
-    /**
-     * @psalm-pure
-     */
-    private static function assertsCa(mixed $basicConstraints): bool
-    {
-        return is_array($basicConstraints) && ($basicConstraints['cA'] ?? false) === true;
+        self::assertInstanceOf(Constructed::class, $basicConstraints);
+        $cA = $basicConstraints['cA'];
+        self::assertInstanceOf(Boolean::class, $cA);
+
+        return $cA->value;
     }
 
     private static function validAt(string $certificate, DateTimeImmutable $time): bool
     {
-        $x509 = new X509();
-        self::assertIsArray($x509->loadX509($certificate));
+        $tbsCertificate = X509::load($certificate)['tbsCertificate'];
+        self::assertInstanceOf(Constructed::class, $tbsCertificate);
+        $validity = $tbsCertificate['validity'];
+        self::assertInstanceOf(Constructed::class, $validity);
 
-        return $x509->validateDate($time);
+        return $time >= self::timeOf($validity['notBefore']) && $time <= self::timeOf($validity['notAfter']);
+    }
+
+    private static function timeOf(mixed $choice): DateTimeInterface
+    {
+        self::assertInstanceOf(Choice::class, $choice);
+        self::assertInstanceOf(DateTimeInterface::class, $choice->value);
+
+        return $choice->value;
     }
 }

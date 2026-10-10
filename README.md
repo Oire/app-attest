@@ -30,9 +30,11 @@ PHP 8.3 or later with the _GMP_, _Mbstring_, _OpenSSL_ and _Sodium_ extensions. 
 suggested, because decoding a large number from untrusted CBOR without it takes time quadratic in the
 number's length, and every attestation is untrusted input.
 
-The library depends on [phpseclib](https://phpseclib.com/) for X.509, on
-[spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR, and on
-[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface.
+The library depends on [spomky-labs/cbor-php](https://github.com/Spomky-Labs/cbor-php) for CBOR and on
+[psr/clock](https://www.php-fig.org/psr/psr-20/) for the clock interface. It reads certificates with its own
+DER reader and checks signatures and keys with OpenSSL, so it does not depend on
+[phpseclib](https://phpseclib.com/) and works next to any version of it, or none (see
+[Using phpseclib in Your Application](#using-phpseclib-in-your-application)).
 
 ## Installation
 
@@ -121,8 +123,8 @@ performs Apple's attestation steps in order:
    and `authData`, and `authData` is long enough for its layout, with one CBOR map, the COSE key, as the
    credential public key after the `credentialId`.
 2. `x5c` holds exactly two certificates, the credential certificate and an intermediate. The intermediate
-   is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, and all
-   three are valid at the clock's time.
+   is a CA issued by the trust anchor, the credential certificate is issued by the intermediate, each
+   signed by its issuer with ECDSA, as Apple's are, and all three are valid at the clock's time.
 3. The nonce, the SHA-256 of `authData` followed by `clientDataHash`, equals the one inside the credential
    certificate's extension `1.2.840.113635.100.8.2`.
 4. The SHA-256 of the credential certificate's public key (its raw 65-byte uncompressed point) equals
@@ -317,10 +319,14 @@ log. Do not send them to the client: refuse with a generic answer.
   in it distinct text strings, `x5c` an array, `fmt` a text string, and `x5c`'s entries, `receipt` and
   `authData` byte strings.
 * `CertificateChain` — the chain is not exactly two certificates, does not lead to the trust anchor, has
-  an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is not exactly
-  one DER `SEQUENCE` with nothing after it, or is longer than 4096 bytes (Apple's are about 1 KiB).
-* `Nonce` — the credential certificate has no nonce extension, or its nonce does not match `authData` and
-  `$clientDataHash`. A `clientDataHash` formed differently from the app's ends here.
+  an intermediate that is not a CA, or is not valid at the clock's time; or a certificate is longer than
+  4096 bytes (Apple's are about 1 KiB), is not DER where the library reads it, marks critical an extension
+  the library does not process for that certificate, is not signed by its issuer with ECDSA over SHA-256,
+  SHA-384 or SHA-512, or its issuer lacks `keyCertSign`, has another subject Name or another key identifier;
+  or the credential certificate claims to be a CA (see Trust Anchor).
+* `Nonce` — the credential certificate has no nonce extension, has it twice or malformed, or its nonce does
+  not match `authData` and `$clientDataHash`. A `clientDataHash` formed differently from the app's ends
+  here.
 * `KeyId` — the credential certificate's key, or the `credentialId` in `authData`, does not match the key
   id.
 * `RpIdHash` — the key belongs to another team or bundle.
@@ -357,14 +363,13 @@ cannot be mistaken for a forged request:
   `'production'` or `'development'`;
 * a `LaunchPolicy` category list holding anything but `ValidationCategory` cases, and
   `LaunchPolicy::allowing()` called with no category;
-* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate.
+* a `TrustAnchor::fromPem()` argument that is not exactly one PEM certificate, whose certificate is not DER
+  where the library reads it, or that has no EC key or no key usage that includes `keyCertSign`, so that no
+  chain could lead to it.
 
-A broken installation or a misconfigured process is a `LogicException`, not a failed verification:
-
-* `TrustAnchor::apple()`, which `AttestationVerifier` calls when you pass no trust anchor, throws one if the
-  bundled Apple root is missing or does not match its pinned fingerprint;
-* `AttestationVerifier::verify()` throws one if your process has registered another phpseclib ASN.1 map for
-  the nonce extension, OID `1.2.840.113635.100.8.2` (see Using phpseclib Elsewhere in Your Application).
+A broken installation is a `LogicException`, not a failed verification: `TrustAnchor::apple()`, which
+`AttestationVerifier` calls when you pass no trust anchor, throws one if the bundled Apple root is missing or
+does not match its pinned fingerprint.
 
 ## What You Must Do Yourself
 
@@ -429,24 +434,45 @@ use Oire\AppAttest\TrustAnchor;
 $verifier = new AttestationVerifier(TrustAnchor::fromPem($testRootPem));
 ```
 
-## Using phpseclib Elsewhere in Your Application
+A test chain must, like Apple's:
 
-`AttestationVerifier` changes two process-wide settings of phpseclib's `X509` class. Both are static, so
-they affect every `X509` object in the same process, not only this library's:
+* use EC keys, not Ed25519 or Ed448;
+* sign each certificate with ECDSA over SHA-256, SHA-384 or SHA-512, with the same algorithm, without
+  parameters, inside and outside `tbsCertificate`;
+* give the root and the intermediate exactly one key usage extension that includes `keyCertSign`;
+* mark the intermediate as a CA with exactly one `basicConstraints` (`cA` true, an optional non-negative
+  path length);
+* name each issuer with exactly the bytes of the issuer's subject Name and, if a certificate carries an
+  authority key identifier, name in it the issuer's subject key identifier and, if it holds one, the
+  issuer's serial number;
+* mark critical, in the intermediate, only `basicConstraints`, the key usage and the key identifiers, and
+  in the credential certificate only these and the nonce extension;
+* give the credential certificate, if it has them, one well-formed key usage and one `basicConstraints`
+  that is the empty `SEQUENCE` (`cA` false, no path length), as Apple's does, and keep every subject and
+  authority key identifier well-formed;
+* keep all three certificates valid at the clock's time;
+* be v3 certificates and DER where the library reads them: lengths, integers and OIDs in their shortest
+  form, booleans `0x00` or `0xFF`, a critical flag left out rather than FALSE, validity times in UTC with
+  seconds and no fraction, nothing after the extensions, the key usage without trailing zero bits, and each
+  of the key usage, key identifier, `basicConstraints` and nonce extensions at most once.
 
-* it calls `X509::disableURLFetch()`, so phpseclib no longer downloads issuer certificates from the
-  `authorityInfoAccess` URLs of the certificates it validates;
-* it registers an ASN.1 map for the App Attest nonce extension, OID `1.2.840.113635.100.8.2`, with
-  `X509::registerExtension()`, so phpseclib decodes that extension into an array for every certificate it
-  loads.
+`TrustAnchor::fromPem()` throws an `InvalidArgumentException` for a root that has no EC key, no
+`keyCertSign` or is not DER; any other miss fails every attestation with `CertificateChain`, except a nonce
+extension that is missing, repeated or not `SEQUENCE { [1] { OCTET STRING } }`, which fails with `Nonce`.
 
-Both happen on every call to `AttestationVerifier::verify()`, not once. If your own code relies on
-phpseclib fetching issuer certificates, call `X509::enableURLFetch()` again after each verification,
-before your code validates its own certificates.
+## Using phpseclib in Your Application
 
-Do not register a map for `1.2.840.113635.100.8.2` yourself. If one other than the library's is already
-registered, phpseclib refuses the library's map, and `verify()` throws a `LogicException` that names the
-conflict instead of verifying.
+The library neither requires nor calls phpseclib, so your application may use phpseclib 3, phpseclib 4 or
+neither alongside it. phpseclib keeps its settings in static properties shared by the whole process, such as
+`ASN1::enableBlobsOnBadDecodes()`, the CA store of `X509::addCA()`, `X509::ignoreKeyUsage()` or
+`X509::looseDNComparison()`. None of them changes a verification result, and the library changes none of
+them: unlike 1.x, it neither disables phpseclib's URL fetching nor registers the App Attest nonce extension
+with phpseclib.
+
+Since no phpseclib switch applies, the library makes its own checks, listed under Trust Anchor, and decodes
+the nonce extension itself. Verification makes no network call: issuer certificates named in
+`authorityInfoAccess` are never fetched. If your own code validates certificates with phpseclib and relied on
+URL fetching being off, call `X509::disableURLFetch()` yourself.
 
 ## Testing Your Own Code
 
@@ -488,11 +514,16 @@ them into the nonce first, is refused with `Signature`. To test a `LaunchPolicy`
 `{"validationCategory": 4, "bundleVersion": "2.1"}` to the 37 bytes of `authenticatorData` before forming
 the nonce. The `CBOR` classes come from `spomky-labs/cbor-php`, which this library already requires.
 
-Attestations are harder to make, because they need a certificate chain with the nonce extension. This
-repository's test-only
-[AttestationBuilder](https://github.com/Oire/app-attest/blob/master/tests/Support/AttestationBuilder.php)
-shows how to sign one with phpseclib and verify it against `TrustAnchor::fromPem()` of its own root. The
-test code is not part of the Composer package.
+Attestations are harder to make, because they need a certificate chain with the nonce extension. The
+credential certificate carries the nonce in extension `1.2.840.113635.100.8.2`, whose value is the DER
+`SEQUENCE { [1] EXPLICIT OCTET STRING }` around the 32-byte SHA-256 of `authData` followed by
+`clientDataHash`. Any tool that issues EC certificates with ECDSA works, as long as the chain meets the rules
+under Trust Anchor; verify it against `TrustAnchor::fromPem()` of its own root. This repository's test-only
+[AttestationBuilder](https://github.com/Oire/app-attest/blob/v2.0.0/tests/Support/AttestationBuilder.php)
+and [SignedCertificate](https://github.com/Oire/app-attest/blob/v2.0.0/tests/Support/SignedCertificate.php)
+show one way with phpseclib 4, which is only a development dependency of this repository: require it yourself
+to build chains the same way, and write the nonce extension's OID yourself rather than reaching for the
+library's `Internal` classes, which are not public API. The test code is not part of the Composer package.
 
 ## API Reference
 

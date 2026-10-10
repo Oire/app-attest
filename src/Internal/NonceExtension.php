@@ -4,11 +4,6 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Internal;
 
-use LogicException;
-use phpseclib3\File\ASN1;
-use phpseclib3\File\X509;
-use RuntimeException;
-
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
  * Copyright © 2026 André Polykanine, Oire Software, https://oire.org/
@@ -30,34 +25,32 @@ use RuntimeException;
  * Apple's nonce extension on the credential certificate, OID 1.2.840.113635.100.8.2:
  * SEQUENCE { [1] EXPLICIT OCTET STRING }.
  *
- * phpseclib keeps extension maps globally, so the verifier and the test builders register this one map.
- * Another map already registered for the OID is a misconfigured process, not a failed verification.
+ * The library decodes the extension's value itself with its own DER reader, so no extension map another
+ * component registers process-wide changes the nonce it reads.
  *
  * @internal
+ *
+ * @psalm-immutable
  */
 final class NonceExtension
 {
-    public const string OID = '1.2.840.113635.100.8.2';
-    public const array MAP = [
-        'type' => ASN1::TYPE_SEQUENCE,
-        'children' => [
-            'nonce' => [
-                'constant' => 1,
-                'explicit' => true,
-                'type' => ASN1::TYPE_OCTET_STRING,
-            ],
-        ],
-    ];
+    /**
+     * The OID's content octets, as Certificate::extensionValues() takes it.
+     */
+    public const string OBJECT_IDENTIFIER = "\x2a\x86\x48\x86\xf7\x63\x64\x08\x02";
+    private const int NONCE_TAG = 0xA1;
 
     /**
-     * @throws LogicException if the process has registered another map for the OID
+     * The octet string inside the extension's value, or null if the value is not exactly the SEQUENCE.
+     *
+     * @psalm-pure
      */
-    public static function register(): void
+    public static function tryDecode(string $value): ?string
     {
-        try {
-            X509::registerExtension(self::OID, self::MAP);
-        } catch (RuntimeException $e) {
-            throw new LogicException('Another ASN.1 map is registered with phpseclib for the App Attest nonce extension ' . self::OID . '; do not register that OID yourself.', 0, $e);
-        }
+        $fields = Der::tryOne($value)?->children(Der::SEQUENCE) ?? [];
+        $explicit = count($fields) === 1 ? ($fields[0] ?? null)?->children(self::NONCE_TAG) ?? [] : [];
+        $nonce = count($explicit) === 1 ? $explicit[0] ?? null : null;
+
+        return Der::hasTag($nonce, Der::OCTET_STRING) ? $nonce->content : null;
     }
 }

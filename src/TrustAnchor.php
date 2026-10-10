@@ -6,11 +6,9 @@ namespace Oire\AppAttest;
 
 use InvalidArgumentException;
 use LogicException;
-use Oire\AppAttest\Internal\Der;
-use Oire\AppAttest\Internal\ErrorGuard;
+use Oire\AppAttest\Internal\Certificate;
+use Oire\AppAttest\Internal\CertificateChain;
 use Oire\AppAttest\Internal\Pem;
-use phpseclib3\File\X509;
-use Throwable;
 
 /**
  * Oire App Attest, verification of Apple App Attest attestations and assertions
@@ -66,16 +64,24 @@ final readonly class TrustAnchor
     }
 
     /**
-     * Any root certificate, such as the one a test signs its own chains with.
+     * Any root certificate, such as the one a test signs its own chains with. Like Apple's, it must hold an
+     * EC key, not an Ed25519 or Ed448 one, and a key usage extension that includes keyCertSign: a chain can
+     * lead to no other root.
      *
-     * @throws InvalidArgumentException if the PEM does not hold exactly one parsable certificate
+     * @throws InvalidArgumentException if the PEM does not hold exactly one parsable certificate, or the
+     *                                  certificate cannot anchor a chain
      */
     public static function fromPem(string $pem): self
     {
         $der = Pem::tryDecode($pem, Pem::CERTIFICATE);
+        $root = $der === null ? null : Certificate::tryParse($der);
 
-        if ($der === null || !Der::isOneSequence($der) || !self::isParsable($der)) {
+        if ($root === null) {
             throw new InvalidArgumentException('The trust anchor must be exactly one PEM-encoded X.509 certificate.');
+        }
+
+        if (!CertificateChain::canAnchor($root)) {
+            throw new InvalidArgumentException('The trust anchor must hold an EC key, not an Ed25519 or Ed448 one, and a key usage extension that includes keyCertSign.');
         }
 
         return new self($pem);
@@ -99,14 +105,5 @@ final readonly class TrustAnchor
         }
 
         return new self($pem);
-    }
-
-    private static function isParsable(string $der): bool
-    {
-        try {
-            return ErrorGuard::call(static fn(): bool => is_array((new X509())->loadX509($der, X509::FORMAT_DER)));
-        } catch (Throwable) {
-            return false;
-        }
     }
 }

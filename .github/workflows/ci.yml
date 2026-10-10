@@ -42,3 +42,13 @@ jobs:
 
       - name: Run tests
         run: composer test
+
+      # Consumers install the package without `require-dev`, from an archive that leaves out what
+      # `.gitattributes` marks `export-ignore`. Install it the same way and verify every genuine vector with
+      # only that autoloader, so src/ cannot come to need a development dependency unnoticed.
+      - name: Verify genuine vectors without development dependencies
+        run: |
+          mkdir "$RUNNER_TEMP/package"
+          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/package"
+          composer install --working-dir="$RUNNER_TEMP/package" --no-dev --prefer-dist --no-interaction --no-progress
+          php -d auto_prepend_file="$RUNNER_TEMP/package/vendor/autoload.php" tests/verify-genuine-vectors.php
