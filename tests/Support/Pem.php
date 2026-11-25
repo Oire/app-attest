@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Tests\Support;
 
+use phpseclib4\File\ASN1;
 use RuntimeException;
 
 /**
@@ -25,8 +26,6 @@ use RuntimeException;
 
 /**
  * PEM armor for the tests, written independently of the library's own.
- *
- * @psalm-pure
  */
 final class Pem
 {
@@ -55,6 +54,18 @@ final class Pem
         }
 
         return $der;
+    }
+
+    /**
+     * Whether phpseclib 4 takes this DER for PEM and then cannot load it. `ASN1::extractBER()`, which runs on
+     * every key phpseclib loads, reads DER holding "\n-", bytes without a dash, then a dash that ends a line, as a
+     * PEM block with an empty body. About one P-256 key in 400,000 does. phpseclib loads a certificate's key
+     * again whenever an `X509` it builds is read back, as `makeCA()` does, so the key generators retry such keys
+     * instead of failing a build at random.
+     */
+    public static function isMistakenForPemByPhpseclib(string $der): bool
+    {
+        return ASN1::extractBER($der) !== $der;
     }
 
     /**

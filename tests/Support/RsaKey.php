@@ -34,6 +34,15 @@ final class RsaKey
 {
     public static function generate(): PrivateKey
     {
+        do {
+            $key = self::generateAny();
+        } while (Pem::isMistakenForPemByPhpseclib($key->getPublicKey()->toString('PKCS8', ['binary' => true])));
+
+        return $key;
+    }
+
+    private static function generateAny(): PrivateKey
+    {
         $key = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_RSA, 'private_key_bits' => 2048]);
 
         if ($key === false || !openssl_pkey_export($key, $pem)) {

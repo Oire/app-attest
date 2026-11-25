@@ -12,20 +12,26 @@ challenges, no network, no logging. Namespace `Oire\AppAttest\` (PSR-4 mapped to
 ```bash
 composer install
 composer test    # phpunit
-composer lint    # php-cs-fixer fix --dry-run --diff, then psalm --no-cache
+composer lint    # composer cs (php-cs-fixer fix --dry-run --diff), then composer psalm (psalm --no-cache)
 ```
 
 Without a local PHP: `docker compose run --rm php composer test` and
-`docker compose run --rm php composer lint` (PHP 8.5 CLI with gmp). Check PHP 8.3 too: the Dockerfile
-takes a `PHP_VERSION` build argument, and the stock `php:8.3-cli` image has neither gmp nor Composer.
+`docker compose run --rm php composer lint` (PHP 8.5 CLI with gmp). Check PHP 8.3 and 8.6 too: the
+Dockerfile takes a `PHP_VERSION` build argument; the stock `php:8.3-cli` image has neither gmp nor Composer,
+and `php:8.6-cli` lacks mbstring as well, which the Dockerfile installs.
 
 ```bash
 docker build --build-arg PHP_VERSION=8.3 -t app-attest-php83 .
 docker run --rm -v "$PWD":/app app-attest-php83 composer test
 docker run --rm -v "$PWD":/app app-attest-php83 composer lint
+docker build --build-arg PHP_VERSION=8.6 -t app-attest-php86 .
+docker run --rm -v "$PWD":/app app-attest-php86 composer test
+docker run --rm -v "$PWD":/app app-attest-php86 composer psalm
 ```
 
-Always run both commands on both versions before committing. If the local PHP lacks gmp, use Docker.
+Always run both commands on all three versions before committing. PHP CS Fixer refuses PHP newer than the
+syntax it supports (8.5 so far), so on 8.6 `composer psalm` stands in for `composer lint`, as in CI; the code
+style does not depend on the runtime. If the local PHP lacks gmp, use Docker.
 Never regenerate the lock with `--ignore-platform-req` beyond `ext-gmp`.
 
 Psalm is pinned to `dev-master` and `config.platform.php` is 8.3.16, so CI and contributors run
@@ -119,6 +125,12 @@ tests/
 - phpseclib's `X509` and `ASN1` settings are static and PHPUnit runs every test in one process: a test that
   changes one (an extension map, the CA store, the target date, a callback, an OID name) restores it in
   `finally`, through reflection where phpseclib has no setter.
+- phpseclib 4 (4.0.4 included) sniffs everything it loads for PEM, and DER holding `"\n-"`, dash-free bytes,
+  then a dash ending a line, reads as an empty PEM block: about one random P-256 key in 400,000 fails to load,
+  and `makeCA()` loads the certificate's key again. Every test key comes from `EcKey::generate()`,
+  `EcKey::generatedByPhpseclib()` or `RsaKey::generate()`, which retry such keys
+  (`Pem::isMistakenForPemByPhpseclib()`), never from `EC::createKey()` directly, and DER is loaded with
+  `ASN1::FORMAT_DER`, never auto-detected.
 - `phpunit.xml.dist` sets `memory_limit` to 128M, but a test of input built to exhaust memory must not
   rely on it: CI may run with unlimited memory. Assert with `HostileInput::peakMemoryGrowthOf()` that the
   input is refused before it is parsed.
@@ -181,13 +193,13 @@ tests/
   certificate with the nonce extension twice fails the nonce.
 - Audit of phpseclib 4's process-wide settings (static properties with public setters): `ASN1`
   `blobsOnBadDecodes`, `recursionDepth` (a depth of 3 or less made the old `TrustAnchor::fromPem()` refuse a
-  valid root), `oids`/`reverseOIDs` (`loadOIDs()`), `invalidateCache`, `useEncodedCache`,
-  `use64BitOIDHandling`; `X509` CA store, target date, CRL and URL callbacks, `recur_limit`, extension maps,
+  valid root), `oids`/`reverseOIDs` (`loadOIDs()`), `invalidateCache`, `useEncodedCache` (4.0.4 removed
+  `use64BitOIDHandling`); `X509` CA store, target date, CRL and URL callbacks, `recur_limit`, extension maps,
   `checkKeyUsage`, `strictDNComparison`, `checkBasicConstraints`, `binary`; `CSR`/`CRL`/`SPKAC`/`PFX`
   output settings; `PKCS::$format`, `AsymmetricKey` plugins, config path and `forceEngine()` per key class,
   EC curve settings, RSA blinding and salt settings, `BigInteger::setEngine()`. phpseclib is not even a
   runtime dependency any more, so none changes a result; the tests still run with it installed.
-  `testNoProcessWideSettingChangesAnOutcome` flips 17 of them; the CRL and URL callbacks need no test, since
+  `testNoProcessWideSettingChangesAnOutcome` flips 16 of them; the CRL and URL callbacks need no test, since
   nothing in `src/` can reach them. cbor-php keeps no static state.
 - `ErrorGuard` throws only for warnings and notices; deprecations and `@`-silenced warnings go on to the
   previous handler. Besides cbor-php, it runs the chain checks, for any warning OpenSSL's key and signature

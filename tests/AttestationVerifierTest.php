@@ -48,8 +48,6 @@ use Oire\AppAttest\Value\ValidationCategory;
 use phpseclib4\Crypt\Common\Formats\Keys\PKCS;
 use phpseclib4\Crypt\EC;
 use phpseclib4\File\ASN1;
-use phpseclib4\File\ASN1\Constructed;
-use phpseclib4\File\ASN1\Maps\Certificate;
 use phpseclib4\File\X509;
 use phpseclib4\Math\BigInteger;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -57,7 +55,6 @@ use PHPUnit\Framework\TestCase;
 use Psr\Clock\ClockInterface;
 use ReflectionProperty;
 use Symfony\Component\Clock\MockClock;
-use Throwable;
 use UnexpectedValueException;
 
 /**
@@ -344,7 +341,6 @@ final class AttestationVerifierTest extends TestCase
         yield 'ASN1::setRecursionDepth(1)' => [self::changing([[ASN1::class, 'recursionDepth']], static fn() => ASN1::setRecursionDepth(1))];
         yield 'ASN1::disableCacheInvalidation()' => [self::changing([[ASN1::class, 'invalidateCache']], static fn() => ASN1::disableCacheInvalidation())];
         yield 'ASN1::ignoreEncodedCache()' => [self::changing([[ASN1::class, 'useEncodedCache']], static fn() => ASN1::ignoreEncodedCache())];
-        yield 'ASN1::enable64BitOIDHandling()' => [self::changing([[ASN1::class, 'use64BitOIDHandling']], static fn() => ASN1::enable64BitOIDHandling())];
         yield 'ASN1::loadOIDs() naming every OID the chain reads' => [self::changing([[ASN1::class, 'oids'], [ASN1::class, 'reverseOIDs']], static fn() => ASN1::loadOIDs([
             'oireKeyUsage' => SignedCertificate::KEY_USAGE_OID,
             'oireSubjectKeyIdentifier' => SignedCertificate::SUBJECT_KEY_IDENTIFIER_OID,
@@ -596,7 +592,7 @@ final class AttestationVerifierTest extends TestCase
         yield 'credential with its authority key identifier twice' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialTbsCertificate(static fn(string $tbs): string => SignedCertificate::withExtensionTwice($tbs, SignedCertificate::AUTHORITY_KEY_IDENTIFIER))];
         yield 'credential signed with ECDSA over SHA-1' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialSignatureHash('sha1')];
         yield 'intermediate with an RSA key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(RsaKey::generate())];
-        yield 'intermediate with an Ed25519 key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(EC::createKey('Ed25519'))];
+        yield 'intermediate with an Ed25519 key' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withIntermediateKey(EcKey::generatedByPhpseclib('Ed25519'))];
         yield 'credential signed under ecdsa-with-SHA512 inside' => [self::credentialSignedAlgorithm(SignedCertificate::ECDSA_WITH_SHA512)];
         yield 'credential signed under id-ecPublicKey inside' => [self::credentialSignedAlgorithm(SignedCertificate::ID_EC_PUBLIC_KEY)];
         yield 'credential issued by a CA the chain does not hold, named in caIssuers' => [static fn(AttestationBuilder $b): AttestationBuilder => $b->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')];
@@ -1331,15 +1327,15 @@ final class AttestationVerifierTest extends TestCase
     }
 
     /**
-     * Damage that makes phpseclib 4 raise a warning (an empty OID) in the signature AlgorithmIdentifiers, found
-     * by XORing every byte of the certificates with every mask. The library reads certificates with its own DER
-     * reader, which must refuse them without a warning too.
+     * Damage that empties the OID of a signature AlgorithmIdentifier (its length 0x08 becomes 0x00), found by
+     * XORing every byte of the certificates with every mask: phpseclib 4 before 4.0.4 raised a warning reading
+     * it. The library's own DER reader must refuse it without one.
      *
      * @return iterable<string, array{bool, int, int}>
      *
      * @psalm-capabilities read-props
      */
-    public static function provideCertificateDamageThatMakesPhpseclibWarn(): iterable
+    public static function provideDamageThatEmptiesASignatureAlgorithmOid(): iterable
     {
         yield 'credential byte 24 XOR 0x08' => [false, 24, 0x08];
         yield 'credential byte 646 XOR 0x08' => [false, 646, 0x08];
@@ -1347,8 +1343,8 @@ final class AttestationVerifierTest extends TestCase
         yield 'intermediate byte 467 XOR 0x08' => [true, 467, 0x08];
     }
 
-    #[DataProvider('provideCertificateDamageThatMakesPhpseclibWarn')]
-    public function testCertificateDamageThatMakesPhpseclibWarnFailsTheChainSilently(bool $intermediateDamaged, int $offset, int $mask): void
+    #[DataProvider('provideDamageThatEmptiesASignatureAlgorithmOid')]
+    public function testEmptySignatureAlgorithmOidFailsTheChainSilently(bool $intermediateDamaged, int $offset, int $mask): void
     {
         $vector = Fixtures::attestation(self::MUTATED_VECTOR);
         [$credential, $intermediate] = self::certificatesOf($vector->bytes);
@@ -1359,7 +1355,7 @@ final class AttestationVerifierTest extends TestCase
             $credential = Damage::flipped($credential, $offset, $mask);
         }
 
-        self::assertNotSame([], self::phpseclibWarningsReading($intermediateDamaged ? $intermediate : $credential), 'phpseclib no longer warns on this damage.');
+        self::assertSame("\x06\x00", mb_substr($intermediateDamaged ? $intermediate : $credential, $offset - 1, 2, '8bit'), 'The damage no longer empties an OID.');
 
         $cbor = self::attestationObject(self::x5c($credential, $intermediate), self::authDataOf($vector->bytes));
 
@@ -2119,35 +2115,6 @@ final class AttestationVerifierTest extends TestCase
         $receiptStart = mb_strpos($cbor, $receipt, 0, '8bit');
 
         return is_int($receiptStart) && $offset >= $receiptStart && $offset < $receiptStart + mb_strlen($receipt, '8bit');
-    }
-
-    /**
-     * The warnings phpseclib raises reading the whole certificate without ErrorGuard.
-     *
-     * @return list<string>
-     */
-    private static function phpseclibWarningsReading(string $der): array
-    {
-        $warnings = [];
-        set_error_handler(static function(int $severity, string $message) use (&$warnings): bool {
-            $warnings[] = $message;
-
-            return true;
-        }, E_WARNING);
-
-        try {
-            $certificate = ASN1::map(ASN1::decodeBER($der), Certificate::MAP);
-
-            if ($certificate instanceof Constructed) {
-                $certificate->toArray();
-            }
-        } catch (Throwable) {
-            return $warnings;
-        } finally {
-            restore_error_handler();
-        }
-
-        return $warnings;
     }
 
     /**

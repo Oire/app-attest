@@ -48,8 +48,6 @@ final class AssertionBuilder
 
     /**
      * A builder with a freshly generated key.
-     *
-     * @psalm-pure
      */
     public static function create(): self
     {

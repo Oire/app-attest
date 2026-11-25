@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && install-php-extensions gmp
+    && install-php-extensions gmp mbstring
 
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 

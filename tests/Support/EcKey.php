@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Oire\AppAttest\Tests\Support;
 
+use phpseclib4\Crypt\EC;
+use phpseclib4\Crypt\EC\PrivateKey;
 use RuntimeException;
 
 /**
@@ -25,8 +27,6 @@ use RuntimeException;
 
 /**
  * A freshly generated P-256 key pair for the test builders.
- *
- * @psalm-immutable
  */
 final readonly class EcKey
 {
@@ -48,10 +48,43 @@ final readonly class EcKey
         public string $point,
     ) {}
 
+    public static function generate(): self
+    {
+        do {
+            $key = self::generateAny();
+        } while (Pem::isMistakenForPemByPhpseclib(Pem::toDer($key->publicKeyPem)));
+
+        return $key;
+    }
+
+    /**
+     * A key phpseclib generates on the curve, such as Ed25519, which OpenSSL cannot generate as an EC key here.
+     */
+    public static function generatedByPhpseclib(string $curve): PrivateKey
+    {
+        do {
+            $key = EC::createKey($curve);
+        } while (Pem::isMistakenForPemByPhpseclib($key->getPublicKey()->toString('PKCS8', ['binary' => true])));
+
+        return $key;
+    }
+
+    /**
+     * A key whose x coordinate starts with a zero byte, which a naive key id computation would drop.
+     */
+    public static function generateWithLeadingZeroX(): self
+    {
+        do {
+            $key = self::generate();
+        } while ($key->point[1] !== "\x00");
+
+        return $key;
+    }
+
     /**
      * @psalm-pure
      */
-    public static function generate(): self
+    private static function generateAny(): self
     {
         $key = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
 
@@ -73,20 +106,6 @@ final readonly class EcKey
         }
 
         return new self($privateKeyPem, $publicKeyPem, mb_substr($spki, -self::POINT_LENGTH, null, '8bit'));
-    }
-
-    /**
-     * A key whose x coordinate starts with a zero byte, which a naive key id computation would drop.
-     *
-     * @psalm-pure
-     */
-    public static function generateWithLeadingZeroX(): self
-    {
-        do {
-            $key = self::generate();
-        } while ($key->point[1] !== "\x00");
-
-        return $key;
     }
 
     /**
