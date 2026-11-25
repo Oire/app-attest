@@ -60,9 +60,11 @@
     },
     "scripts": {
         "test": "phpunit",
+        "cs": "php-cs-fixer fix --dry-run --diff",
+        "psalm": "psalm --no-cache",
         "lint": [
-            "php-cs-fixer fix --dry-run --diff",
-            "psalm --no-cache"
+            "@cs",
+            "@psalm"
         ]
     },
     "config": {

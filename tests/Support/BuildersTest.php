@@ -69,10 +69,10 @@ final class BuildersTest extends TestCase
         $attestation = AttestationBuilder::create()->build();
 
         self::assertSame($attestation->rootPem, $attestation->trustAnchor()->pem);
-        self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+        self::assertTrue(self::issuedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
         self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
         self::assertFalse(self::issuedBy($attestation->credentialDer, AttestationBuilder::create()->build()->intermediateDer));
-        self::assertTrue(self::isCa($attestation->rootPem));
+        self::assertTrue(self::isCa(Pem::toDer($attestation->rootPem)));
         self::assertTrue(self::isCa($attestation->intermediateDer));
         self::assertFalse(self::isCa($attestation->credentialDer));
 
@@ -80,9 +80,20 @@ final class BuildersTest extends TestCase
         self::assertSame((new DateTimeImmutable(AttestationBuilder::DEFAULT_TIME))->getTimestamp(), $now->getTimestamp());
         self::assertTrue(self::validAt($attestation->credentialDer, $now));
         self::assertTrue(self::validAt($attestation->intermediateDer, $now));
-        self::assertTrue(self::validAt($attestation->rootPem, $now));
+        self::assertTrue(self::validAt(Pem::toDer($attestation->rootPem), $now));
         self::assertFalse(self::validAt($attestation->credentialDer, $now->modify('+2 days')));
         self::assertFalse(self::validAt($attestation->credentialDer, $now->modify('-2 days')));
+    }
+
+    /**
+     * A genuine P-256 key holding "\n-" and ending in a dash, which phpseclib 4 takes for an empty PEM block.
+     */
+    public function testKeyPhpseclibTakesForPemIsRecognized(): void
+    {
+        $misread = (string) hex2bin('3059301306072a8648ce3d020106082a8648ce3d03010703420004850a6289e8441920fa4329de54935bed23dcb2665e3ba61315b8ee0a2d640994fa27b1309618e061c8f3d61ab6efc5dc73ac2529598612c477a9d6e3d8e7862d');
+
+        self::assertTrue(Pem::isMistakenForPemByPhpseclib($misread));
+        self::assertFalse(Pem::isMistakenForPemByPhpseclib(Pem::toDer(EcKey::generate()->publicKeyPem)));
     }
 
     public function testCredentialCertificateCarriesTheNonce(): void
@@ -197,9 +208,9 @@ final class BuildersTest extends TestCase
 
         foreach ([$expired, $notYetValid] as $attestation) {
             self::assertFalse(self::validAt($attestation->intermediateDer, $now));
-            self::assertTrue(self::validAt($attestation->rootPem, $now));
+            self::assertTrue(self::validAt(Pem::toDer($attestation->rootPem), $now));
             self::assertTrue(self::validAt($attestation->credentialDer, $now));
-            self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+            self::assertTrue(self::issuedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
             self::assertTrue(self::issuedBy($attestation->credentialDer, $attestation->intermediateDer));
         }
 
@@ -285,7 +296,7 @@ final class BuildersTest extends TestCase
         $rootDer = Pem::toDer($attestation->rootPem);
 
         self::assertNull(X509::load($rootDer, ASN1::FORMAT_DER)->getExtension('id-ce-keyUsage'));
-        self::assertTrue(self::isCa($attestation->rootPem));
+        self::assertTrue(self::isCa(Pem::toDer($attestation->rootPem)));
         self::assertTrue(self::signedBy($attestation->intermediateDer, $rootDer));
     }
 
@@ -465,11 +476,11 @@ final class BuildersTest extends TestCase
             ->build();
         $now = $attestation->clock()->now();
 
-        self::assertFalse(self::validAt($attestation->rootPem, $now));
-        self::assertTrue(self::validAt($attestation->rootPem, $now->modify('-2 days')));
+        self::assertFalse(self::validAt(Pem::toDer($attestation->rootPem), $now));
+        self::assertTrue(self::validAt(Pem::toDer($attestation->rootPem), $now->modify('-2 days')));
         self::assertTrue(self::validAt($attestation->intermediateDer, $now));
         self::assertTrue(self::validAt($attestation->credentialDer, $now));
-        self::assertTrue(self::issuedBy($attestation->intermediateDer, $attestation->rootPem));
+        self::assertTrue(self::issuedBy($attestation->intermediateDer, Pem::toDer($attestation->rootPem)));
     }
 
     public function testCredentialCanComeFromAnUnlistedIssuer(): void
@@ -477,7 +488,7 @@ final class BuildersTest extends TestCase
         $attestation = AttestationBuilder::create()
             ->withCredentialFromAnUnlistedIssuer('http://192.0.2.1/ca.cer')
             ->build();
-        $credential = X509::load($attestation->credentialDer);
+        $credential = X509::load($attestation->credentialDer, ASN1::FORMAT_DER);
         $authorityInfoAccess = $credential->getExtension('id-pe-authorityInfoAccess')['extnValue'] ?? null;
         self::assertInstanceOf(Constructed::class, $authorityInfoAccess);
 
@@ -616,11 +627,11 @@ final class BuildersTest extends TestCase
         $authorities = X509::getCAs();
         $date = X509::getTargetValidationDate();
         X509::clearCAStore();
-        X509::addCA($issuer);
+        X509::addCA($issuer, ASN1::FORMAT_DER);
         X509::setTargetValidationDate(null);
 
         try {
-            return X509::load($certificate)->validateSignature();
+            return X509::load($certificate, ASN1::FORMAT_DER)->validateSignature();
         } finally {
             X509::clearCAStore();
 
@@ -679,7 +690,7 @@ final class BuildersTest extends TestCase
 
     private static function isCa(string $certificate): bool
     {
-        $basicConstraints = X509::load($certificate)->getExtension('id-ce-basicConstraints')['extnValue'] ?? null;
+        $basicConstraints = X509::load($certificate, ASN1::FORMAT_DER)->getExtension('id-ce-basicConstraints')['extnValue'] ?? null;
 
         if ($basicConstraints === null) {
             return false;
@@ -694,7 +705,7 @@ final class BuildersTest extends TestCase
 
     private static function validAt(string $certificate, DateTimeImmutable $time): bool
     {
-        $tbsCertificate = X509::load($certificate)['tbsCertificate'];
+        $tbsCertificate = X509::load($certificate, ASN1::FORMAT_DER)['tbsCertificate'];
         self::assertInstanceOf(Constructed::class, $tbsCertificate);
         $validity = $tbsCertificate['validity'];
         self::assertInstanceOf(Constructed::class, $validity);

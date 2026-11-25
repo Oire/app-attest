@@ -582,7 +582,7 @@ docker compose run --rm php composer test
 docker compose run --rm php composer lint
 ```
 
-The same Dockerfile builds PHP 8.3, the lowest supported version:
+The same Dockerfile builds PHP 8.3, the lowest supported version, and any later one, such as 8.6:
 
 ```shell
 docker build --build-arg PHP_VERSION=8.3 -t app-attest-php83 .
